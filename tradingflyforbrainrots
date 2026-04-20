@@ -1,0 +1,346 @@
+--[[
+    Brainrot Teleport & Auto-Steal GUI
+    With Dynamic Zone Teleport + Live Brainrot List
+]]
+
+-- Load Rayfield
+local success, Rayfield = pcall(function()
+    return loadstring(game:HttpGet('https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/main/source.lua'))()
+end)
+
+if not success or not Rayfield then
+    warn("Rayfield failed to load.")
+    return
+end
+
+local player = game.Players.LocalPlayer
+
+-- Create Window
+local Window = Rayfield:CreateWindow({
+    Name = "Brainrot Stealer",
+    LoadingTitle = "Loading...",
+    LoadingSubtitle = "by your assistant",
+    ConfigurationSaving = { Enabled = false },
+    Discord = { Enabled = false },
+    KeySystem = false,
+})
+
+-- ═══════════════════════════════════════
+--  SHARED HELPERS
+-- ═══════════════════════════════════════
+
+-- Returns { displayName = part } for every part in BrainrotSpawn
+-- Display name: "Common - Godly", "Common - Rare", etc.
+local function getBrainrotSpawnZones()
+    local result = {}
+    local spawnFolder = workspace:FindFirstChild("Main Map")
+        and workspace["Main Map"]:FindFirstChild("BrainrotSpawn")
+    if not spawnFolder then return result end
+
+    for _, category in ipairs(spawnFolder:GetChildren()) do
+        for _, part in ipairs(category:GetDescendants()) do
+            if part:IsA("BasePart") then
+                local label = category.Name .. " - " .. part.Name
+                result[label] = part
+            end
+        end
+        -- Also handle if the category itself is a BasePart
+        if category:IsA("BasePart") then
+            result[category.Name] = category
+        end
+    end
+    return result
+end
+
+-- Returns sorted list of zone display names
+local function getZoneNames(zonesTable)
+    local names = {}
+    for name, _ in pairs(zonesTable) do
+        table.insert(names, name)
+    end
+    table.sort(names)
+    if #names == 0 then table.insert(names, "None found") end
+    return names
+end
+
+-- Returns list of currently spawned brainrot names
+local function getSpawnedBrainrots()
+    local brainrotsFolder = workspace:FindFirstChild("Brainrots")
+    local names = {}
+    if brainrotsFolder then
+        for _, child in ipairs(brainrotsFolder:GetChildren()) do
+            table.insert(names, child.Name)
+        end
+    end
+    table.sort(names)
+    if #names == 0 then table.insert(names, "None found") end
+    return names
+end
+
+-- Find player's base Collect.Touch
+local function getPlayerBase()
+    local basesFolder = workspace:FindFirstChild("Main Map")
+        and workspace["Main Map"]:FindFirstChild("Player Bases")
+    if not basesFolder then return nil end
+
+    for _, base in ipairs(basesFolder:GetChildren()) do
+        if base.Name:lower():find(player.Name:lower()) then
+            for _, slot in ipairs(base:GetChildren()) do
+                local collect = slot:FindFirstChild("Collect")
+                if collect then
+                    local touch = collect:FindFirstChild("Touch")
+                    if touch then return touch end
+                end
+            end
+        end
+    end
+
+    -- Fallback: first base found
+    for _, base in ipairs(basesFolder:GetChildren()) do
+        for _, slot in ipairs(base:GetChildren()) do
+            local collect = slot:FindFirstChild("Collect")
+            if collect then
+                local touch = collect:FindFirstChild("Touch")
+                if touch then return touch end
+            end
+        end
+    end
+    return nil
+end
+
+-- Steal logic
+local holdDuration = 1.0
+
+local function stealBrainrot(targetName)
+    if not targetName or targetName == "" or targetName == "None found" then
+        Rayfield:Notify({ Title = "Error", Content = "No brainrot selected.", Duration = 3, Image = 4483345998 })
+        return
+    end
+
+    local character = player.Character or player.CharacterAdded:Wait()
+    local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+
+    local targetPart, targetPrompt = nil, nil
+    local searchRoot = workspace:FindFirstChild("Brainrots") or workspace
+
+    for _, obj in ipairs(searchRoot:GetDescendants()) do
+        if obj:IsA("BasePart") and obj.Name:lower() == targetName:lower() then
+            targetPart = obj
+            for _, child in ipairs(obj:GetChildren()) do
+                if child:IsA("ProximityPrompt") and
+                   (child.Name == "Pickup" or child.Name == "ProximityPrompt") then
+                    targetPrompt = child
+                    break
+                end
+            end
+            if targetPrompt then break end
+        end
+    end
+
+    if not targetPart then
+        Rayfield:Notify({ Title = "Not Found", Content = "'" .. targetName .. "' not in workspace.", Duration = 4, Image = 4483345998 })
+        return
+    end
+
+    if not targetPrompt then
+        Rayfield:Notify({ Title = "No Prompt", Content = "Found part but no Pickup ProximityPrompt.", Duration = 4, Image = 4483345998 })
+        return
+    end
+
+    -- Teleport to brainrot
+    humanoidRootPart.CFrame = targetPart.CFrame * CFrame.new(0, 2, 0)
+    task.wait(0.2)
+
+    -- Hold prompt
+    targetPrompt:InputHoldBegin()
+    task.wait(holdDuration)
+    targetPrompt:InputHoldEnd()
+    task.wait(0.2)
+
+    -- Return to base
+    local baseTouchPart = getPlayerBase()
+    if baseTouchPart then
+        humanoidRootPart.CFrame = baseTouchPart.CFrame * CFrame.new(0, 3, 0)
+        Rayfield:Notify({ Title = "Success", Content = "Stolen & returned to base!", Duration = 3, Image = 4483345998 })
+    else
+        Rayfield:Notify({ Title = "Partial Success", Content = "Picked up, but couldn't find your base.", Duration = 4, Image = 4483345998 })
+    end
+end
+
+-- ═══════════════════════════════════════
+--  TAB 1: Auto Steal
+-- ═══════════════════════════════════════
+local StealTab = Window:CreateTab("Auto Steal", 4483345998)
+
+local brainrotName = ""
+local selectedBrainrot = ""
+
+StealTab:CreateInput({
+    Name = "Brainrot Name (manual)",
+    PlaceholderText = "e.g. Strawberryelli Flamingelli",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        brainrotName = Text
+    end,
+})
+
+StealTab:CreateSlider({
+    Name = "Hold Duration (seconds)",
+    Range = {0.1, 3},
+    Increment = 0.1,
+    Suffix = "s",
+    CurrentValue = 1.0,
+    Flag = "HoldDuration",
+    Callback = function(Value)
+        holdDuration = Value
+    end,
+})
+
+local BrainrotDropdown = StealTab:CreateDropdown({
+    Name = "Spawned Brainrots",
+    Options = getSpawnedBrainrots(),
+    CurrentOption = {"Select one..."},
+    MultipleOptions = false,
+    Flag = "BrainrotDropdown",
+    Callback = function(Options)
+        selectedBrainrot = Options[1]
+        brainrotName = Options[1]
+    end,
+})
+
+StealTab:CreateButton({
+    Name = "↻ Refresh Brainrot List",
+    Callback = function()
+        local fresh = getSpawnedBrainrots()
+        pcall(function() BrainrotDropdown:Refresh(fresh, true) end)
+        Rayfield:Notify({ Title = "Refreshed", Content = #fresh .. " brainrot(s) found.", Duration = 2, Image = 4483345998 })
+    end,
+})
+
+StealTab:CreateButton({
+    Name = "Teleport & Steal",
+    Callback = function()
+        local target = (selectedBrainrot ~= "" and selectedBrainrot) or brainrotName
+        stealBrainrot(target)
+    end,
+})
+
+StealTab:CreateLabel("Pick from dropdown or type a name manually.")
+
+-- ═══════════════════════════════════════
+--  TAB 2: Zone Teleport
+-- ═══════════════════════════════════════
+local ZoneTab = Window:CreateTab("Zones", 4483345998)
+
+-- Static hub zones from MAIN_ARIGATO
+local HUB_ZONES = {
+    ["Hub - Sell"]    = function() return workspace.MAIN_ARIGATO and workspace.MAIN_ARIGATO.parts and workspace.MAIN_ARIGATO.parts:FindFirstChild("Sell") end,
+    ["Hub - Shop"]    = function() return workspace.MAIN_ARIGATO and workspace.MAIN_ARIGATO.parts and workspace.MAIN_ARIGATO.parts:FindFirstChild("Shop") end,
+    ["Hub - Speed"]   = function() return workspace.MAIN_ARIGATO and workspace.MAIN_ARIGATO.parts and workspace.MAIN_ARIGATO.parts:FindFirstChild("Speed") end,
+    ["Hub - Carry"]   = function() return workspace.MAIN_ARIGATO and workspace.MAIN_ARIGATO.parts and workspace.MAIN_ARIGATO.parts:FindFirstChild("Carry") end,
+    ["Hub - MaxFuel"] = function() return workspace.MAIN_ARIGATO and workspace.MAIN_ARIGATO.parts and workspace.MAIN_ARIGATO.parts:FindFirstChild("MaxFuel") end,
+    ["Hub - Rebirth"] = function() return workspace.MAIN_ARIGATO and workspace.MAIN_ARIGATO.parts and workspace.MAIN_ARIGATO.parts:FindFirstChild("Rebirth") end,
+    ["Hub - Index"]   = function() return workspace.MAIN_ARIGATO and workspace.MAIN_ARIGATO.parts and workspace.MAIN_ARIGATO.parts:FindFirstChild("Index") end,
+    ["Hub - Group"]   = function() return workspace.MAIN_ARIGATO and workspace.MAIN_ARIGATO.parts and workspace.MAIN_ARIGATO.parts:FindFirstChild("Group") end,
+    ["Hub - Spins"]   = function() return workspace.MAIN_ARIGATO and workspace.MAIN_ARIGATO.parts and workspace.MAIN_ARIGATO.parts:FindFirstChild("Spins") end,
+    ["My Base"]       = function() return getPlayerBase() end,
+}
+
+-- Build initial full zone list: BrainrotSpawn zones + hub zones
+local function buildAllZoneOptions()
+    local spawnZones = getBrainrotSpawnZones()  -- { displayName = part }
+    local allNames = getZoneNames(spawnZones)
+
+    -- Append hub zone names
+    local hubNames = {}
+    for name, _ in pairs(HUB_ZONES) do
+        table.insert(hubNames, name)
+    end
+    table.sort(hubNames)
+    for _, name in ipairs(hubNames) do
+        table.insert(allNames, name)
+    end
+
+    return allNames, spawnZones
+end
+
+local selectedZone = ""
+local currentSpawnZones = {}
+
+local allZoneOptions, initSpawnZones = buildAllZoneOptions()
+currentSpawnZones = initSpawnZones
+
+local ZoneDropdown = ZoneTab:CreateDropdown({
+    Name = "Select Zone",
+    Options = allZoneOptions,
+    CurrentOption = {"Select a zone..."},
+    MultipleOptions = false,
+    Flag = "ZoneDropdown",
+    Callback = function(Options)
+        selectedZone = Options[1]
+    end,
+})
+
+ZoneTab:CreateButton({
+    Name = "↻ Refresh Zone List",
+    Callback = function()
+        local fresh, freshSpawnZones = buildAllZoneOptions()
+        currentSpawnZones = freshSpawnZones
+        pcall(function() ZoneDropdown:Refresh(fresh, true) end)
+        Rayfield:Notify({ Title = "Zones Refreshed", Content = #fresh .. " zone(s) found.", Duration = 2, Image = 4483345998 })
+    end,
+})
+
+ZoneTab:CreateButton({
+    Name = "Teleport to Zone",
+    Callback = function()
+        if selectedZone == "" or selectedZone == "None found" then
+            Rayfield:Notify({ Title = "Error", Content = "Please select a zone first.", Duration = 3, Image = 4483345998 })
+            return
+        end
+
+        local character = player.Character or player.CharacterAdded:Wait()
+        local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+
+        -- Resolve the part: check BrainrotSpawn zones first, then hub zones
+        local zonePart = nil
+
+        if currentSpawnZones[selectedZone] then
+            -- Direct BasePart from BrainrotSpawn
+            zonePart = currentSpawnZones[selectedZone]
+        elseif HUB_ZONES[selectedZone] then
+            -- Hub zone via getter function
+            zonePart = HUB_ZONES[selectedZone]()
+        end
+
+        if not zonePart then
+            Rayfield:Notify({ Title = "Zone Not Found", Content = "'" .. selectedZone .. "' could not be located.", Duration = 4, Image = 4483345998 })
+            return
+        end
+
+        -- Resolve CFrame
+        local targetCFrame = nil
+        if zonePart:IsA("BasePart") then
+            targetCFrame = zonePart.CFrame
+        elseif zonePart:IsA("Model") and zonePart.PrimaryPart then
+            targetCFrame = zonePart.PrimaryPart.CFrame
+        else
+            for _, c in ipairs(zonePart:GetDescendants()) do
+                if c:IsA("BasePart") then
+                    targetCFrame = c.CFrame
+                    break
+                end
+            end
+        end
+
+        if not targetCFrame then
+            Rayfield:Notify({ Title = "Error", Content = "Couldn't get a position for this zone.", Duration = 3, Image = 4483345998 })
+            return
+        end
+
+        humanoidRootPart.CFrame = targetCFrame * CFrame.new(0, 4, 0)
+        Rayfield:Notify({ Title = "Teleported!", Content = "Arrived at " .. selectedZone, Duration = 2, Image = 4483345998 })
+    end,
+})
+
+ZoneTab:CreateLabel("Zones auto-loaded from BrainrotSpawn. Refresh if needed.")
