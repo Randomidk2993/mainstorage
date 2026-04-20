@@ -1,0 +1,136 @@
+-- car fly | improved
+-- original by zach
+
+local FlyKey = Enum.KeyCode.V
+local SpeedKey = Enum.KeyCode.LeftControl
+local SpeedKeyMultiplier = 2
+local FlightSpeed = 80
+local VerticalSpeed = 40
+local FlightAcceleration = 8
+local TurnSpeed = 6
+
+local UIS = game:GetService("UserInputService")
+local SG = game:GetService("StarterGui")
+local RS = game:GetService("RunService")
+local Players = game:GetService("Players")
+local User = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local UserRootPart = nil
+local Connection = nil
+local CurrentVelocity = Vector3.zero
+local BodyMover = nil
+local RightClickHeld = false   -- track right click manually
+
+workspace.Changed:Connect(function()
+    Camera = workspace.CurrentCamera
+end)
+
+local function notify(text)
+    SG:SetCore("SendNotification", { Title = "car fly", Text = text })
+end
+
+local function setCharacter(c)
+    UserRootPart = c:WaitForChild("HumanoidRootPart")
+end
+User.CharacterAdded:Connect(setCharacter)
+if User.Character then setCharacter(User.Character) end
+
+local function destroyMover()
+    if BodyMover then
+        BodyMover:Destroy()
+        BodyMover = nil
+    end
+end
+
+-- track right click state
+UIS.InputBegan:Connect(function(input, gp)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        RightClickHeld = true
+    end
+end)
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        RightClickHeld = false
+    end
+end)
+
+local function Flight(delta)
+    if not UserRootPart then return end
+    local car = UserRootPart:GetRootPart()
+    if car.Anchored or not isnetworkowner(car) then return end
+
+    local horizontalDir = Vector3.zero
+    local verticalDir = 0
+
+    if not UIS:GetFocusedTextBox() then
+        local camLook  = Camera.CFrame.LookVector
+        local camRight = Camera.CFrame.RightVector
+        local flatLook  = Vector3.new(camLook.X,  0, camLook.Z)
+        local flatRight = Vector3.new(camRight.X, 0, camRight.Z)
+        if flatLook.Magnitude  > 0.01 then flatLook  = flatLook.Unit  end
+        if flatRight.Magnitude > 0.01 then flatRight = flatRight.Unit end
+
+        local wHeld = UIS:IsKeyDown(Enum.KeyCode.W)
+
+        if wHeld and RightClickHeld then
+            horizontalDir = flatLook
+        else
+            if wHeld                             then horizontalDir += flatLook  end
+            if UIS:IsKeyDown(Enum.KeyCode.S)     then horizontalDir -= flatLook  end
+            if UIS:IsKeyDown(Enum.KeyCode.A)     then horizontalDir -= flatRight end
+            if UIS:IsKeyDown(Enum.KeyCode.D)     then horizontalDir += flatRight end
+        end
+
+        if UIS:IsKeyDown(Enum.KeyCode.E) then verticalDir =  1 end
+        if UIS:IsKeyDown(Enum.KeyCode.Q) then verticalDir = -1 end
+    end
+
+    local speed = FlightSpeed * (UIS:IsKeyDown(SpeedKey) and SpeedKeyMultiplier or 1)
+    local flatTarget = (horizontalDir.Magnitude > 0 and horizontalDir.Unit or Vector3.zero) * speed
+    local vertTarget = Vector3.new(0, verticalDir * VerticalSpeed, 0)
+    local target = flatTarget + vertTarget
+
+    CurrentVelocity = CurrentVelocity:Lerp(target, math.clamp(delta * FlightAcceleration, 0, 1))
+
+    local flatVelocity = Vector3.new(CurrentVelocity.X, 0, CurrentVelocity.Z)
+
+    if not BodyMover then
+        BodyMover = Instance.new("BodyVelocity")
+        BodyMover.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+        BodyMover.P = 8e3
+        BodyMover.Parent = car
+    end
+    BodyMover.Velocity = CurrentVelocity
+
+    if car ~= UserRootPart and flatVelocity.Magnitude > 0.5 then
+        car.AssemblyAngularVelocity = Vector3.zero
+        local lookTarget = car.Position + flatVelocity
+        local flatCFrame = CFrame.new(car.Position, lookTarget)
+        flatCFrame = CFrame.fromMatrix(
+            car.Position,
+            flatCFrame.RightVector * Vector3.new(1, 0, 1),
+            Vector3.yAxis
+        )
+        car.CFrame = car.CFrame:Lerp(flatCFrame, math.clamp(delta * TurnSpeed, 0, 1))
+    end
+end
+
+UIS.InputBegan:Connect(function(input, gp)
+    if gp or input.KeyCode ~= FlyKey then return end
+    if Connection then
+        Connection:Disconnect()
+        Connection = nil
+        destroyMover()
+        notify("disabled")
+    else
+        CurrentVelocity = Vector3.new(
+            UserRootPart.AssemblyLinearVelocity.X,
+            0,
+            UserRootPart.AssemblyLinearVelocity.Z
+        )
+        Connection = RS.Heartbeat:Connect(Flight)
+        notify("enabled")
+    end
+end)
+
+notify("ready")
