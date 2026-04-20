@@ -1,0 +1,347 @@
+-- Ball Hitbox Adjuster (Visual Mesh Scaling Support - Fixed)
+-- Run this script in your executor's console
+
+-- ======================== Load Rayfield ========================
+local Rayfield
+do
+    local success, result = pcall(function()
+        return loadstring(game:HttpGet(
+            "https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/main/source.lua"
+        ))()
+    end)
+
+    if not success or type(result) ~= "table" then
+        error("Rayfield failed to load: " .. tostring(result))
+    end
+
+    Rayfield = result
+end
+
+-- ======================== Configuration ========================
+local BALL_PREFIX       = "CLIENT_BALL_"
+local RETRY_INTERVAL    = 2
+local MONITOR_INTERVAL  = 1
+local MAX_PART_SIZE     = 2048
+
+-- ======================== Utility Functions ========================
+local function findBallModel()
+    for _, obj in ipairs(workspace:GetChildren()) do
+        if obj:IsA("Model") and obj.Name:sub(1, #BALL_PREFIX) == BALL_PREFIX then
+            return obj
+        end
+    end
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and obj.Name:sub(1, #BALL_PREFIX) == BALL_PREFIX then
+            return obj
+        end
+    end
+    return nil
+end
+
+local function getRootPart(model)
+    return model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+end
+
+-- Enhanced snapshot: stores original size, offset, and mesh scaling info with error handling
+local function snapshotModel(model)
+    local snapshot = {}
+    local root = getRootPart(model)
+    if not root then
+        warn("No root part found for model:", model:GetFullName())
+        return {}, nil
+    end
+
+    local function safeGetMeshScale(part)
+        local success, scale = pcall(function() return part.MeshScale end)
+        return success and scale or Vector3.new(1,1,1)
+    end
+
+    local function safeGetSpecialMeshScale(mesh)
+        local success, scale = pcall(function() return mesh.Scale end)
+        return success and scale or Vector3.new(1,1,1)
+    end
+
+    local function addPart(part)
+        if part:IsA("BasePart") and not snapshot[part] then
+            local meshData = nil
+
+            -- Attempt to identify mesh type safely
+            local isMeshPart = pcall(function() return part:IsA("MeshPart") end)
+            if isMeshPart and part:IsA("MeshPart") then
+                meshData = {
+                    type = "MeshPart",
+                    originalMeshScale = safeGetMeshScale(part),
+                }
+            else
+                -- Check for SpecialMesh inside a regular Part
+                local mesh = part:FindFirstChildWhichIsA("SpecialMesh")
+                if mesh then
+                    meshData = {
+                        type = "SpecialMesh",
+                        meshObject = mesh,
+                        originalScale = safeGetSpecialMeshScale(mesh),
+                    }
+                end
+            end
+
+            snapshot[part] = {
+                originalSize   = part.Size,
+                originalOffset = root.CFrame:Inverse() * part.CFrame,
+                meshData       = meshData,
+            }
+        end
+    end
+
+    -- Recursively get all descendants
+    for _, part in ipairs(model:GetDescendants()) do
+        addPart(part)
+    end
+    for _, part in ipairs(model:GetChildren()) do
+        addPart(part)
+    end
+
+    return snapshot, root
+end
+
+-- Apply scaling to hitbox and optionally visual mesh (with error protection)
+local function applyScale(model, snapshot, root, factor, enabled, scaleVisualMesh)
+    if not model or not model.Parent or not root or not root.Parent then
+        return false
+    end
+
+    local success = pcall(function()
+        for part, data in pairs(snapshot) do
+            if part and part.Parent then
+                if enabled then
+                    -- Scale hitbox (collision)
+                    local newSize = data.originalSize * factor
+                    newSize = Vector3.new(
+                        math.min(newSize.X, MAX_PART_SIZE),
+                        math.min(newSize.Y, MAX_PART_SIZE),
+                        math.min(newSize.Z, MAX_PART_SIZE)
+                    )
+                    pcall(function() part.Size = newSize end)
+
+                    -- Scale visual mesh if enabled
+                    if scaleVisualMesh and data.meshData then
+                        if data.meshData.type == "MeshPart" then
+                            pcall(function()
+                                part.MeshScale = data.meshData.originalMeshScale * factor
+                            end)
+                        elseif data.meshData.type == "SpecialMesh" then
+                            local mesh = data.meshData.meshObject
+                            if mesh and mesh.Parent == part then
+                                pcall(function()
+                                    mesh.Scale = data.meshData.originalScale * factor
+                                end)
+                            end
+                        end
+                    end
+
+                    pcall(function()
+                        part.CFrame = root.CFrame * data.originalOffset
+                    end)
+                else
+                    -- Restore original state
+                    pcall(function() part.Size = data.originalSize end)
+                    if data.meshData then
+                        if data.meshData.type == "MeshPart" then
+                            pcall(function()
+                                part.MeshScale = data.meshData.originalMeshScale
+                            end)
+                        elseif data.meshData.type == "SpecialMesh" then
+                            local mesh = data.meshData.meshObject
+                            if mesh and mesh.Parent == part then
+                                pcall(function()
+                                    mesh.Scale = data.meshData.originalScale
+                                end)
+                            end
+                        end
+                    end
+                    pcall(function()
+                        part.CFrame = root.CFrame * data.originalOffset
+                    end)
+                end
+            end
+        end
+    end)
+
+    if not success then
+        warn("ApplyScale encountered an error at factor " .. factor)
+    end
+    return success
+end
+
+-- ======================== State Management ========================
+local ballModel = findBallModel()
+local snapshot, rootPart
+local currentFactor = 1
+local hitboxEnabled = false
+local scaleVisualMeshEnabled = true  -- Default: also scale visual mesh
+
+local function refreshBall()
+    local newModel = findBallModel()
+    if newModel and newModel ~= ballModel then
+        ballModel = newModel
+        snapshot, rootPart = snapshotModel(ballModel)
+        if ballModel and rootPart then
+            if hitboxEnabled then
+                applyScale(ballModel, snapshot, rootPart, currentFactor, true, scaleVisualMeshEnabled)
+            end
+            return true
+        end
+    end
+    return false
+end
+
+-- Wait for ball initially
+if not ballModel then
+    warn("Ball not found – retrying every " .. RETRY_INTERVAL .. "s …")
+    repeat
+        task.wait(RETRY_INTERVAL)
+        ballModel = findBallModel()
+    until ballModel
+end
+
+snapshot, rootPart = snapshotModel(ballModel)
+print("Ball found: " .. ballModel:GetFullName())
+print("Parts captured: " .. tostring(#snapshot))
+
+-- ======================== UI Creation ========================
+local Window = Rayfield:CreateWindow({
+    Name            = "Ball Hitbox Adjuster",
+    LoadingTitle    = "Hitbox Adjuster",
+    LoadingSubtitle = "Visual Mesh Scaling",
+    ConfigurationSaving = { Enabled = false },
+    Discord         = { Enabled = false },
+    KeySystem       = false,
+})
+
+local Tab = Window:CreateTab("Main", "settings")
+
+local StatusLabel = Tab:CreateLabel("Ball: " .. (ballModel and ballModel.Name or "Not Found"))
+local ScaleLabel  = Tab:CreateLabel("Current Scale: 1.0x")
+
+Tab:CreateButton({
+    Name     = "Refresh Ball",
+    Callback = function()
+        if refreshBall() then
+            StatusLabel:Set("Ball: " .. (ballModel and ballModel.Name or "Not Found"))
+            ScaleLabel:Set("Current Scale: " .. string.format("%.1f", currentFactor) .. "x")
+            Rayfield:Notify({
+                Title   = "Ball Refreshed",
+                Content = "Parts: " .. tostring(#snapshot) .. " | Override " .. (hitboxEnabled and "ON" or "OFF"),
+                Duration = 2,
+            })
+        else
+            Rayfield:Notify({
+                Title   = "No Change",
+                Content = "Ball model unchanged or not found.",
+                Duration = 2,
+            })
+        end
+    end,
+})
+
+Tab:CreateToggle({
+    Name         = "Enable Hitbox Override",
+    CurrentValue = false,
+    Flag         = "HitboxToggle",
+    Callback     = function(value)
+        hitboxEnabled = value
+        if ballModel and rootPart then
+            applyScale(ballModel, snapshot, rootPart, currentFactor, hitboxEnabled, scaleVisualMeshEnabled)
+        end
+    end,
+})
+
+Tab:CreateToggle({
+    Name         = "Scale Visual Mesh (Matches Hitbox)",
+    CurrentValue = true,
+    Flag         = "VisualMeshToggle",
+    Callback     = function(value)
+        scaleVisualMeshEnabled = value
+        if hitboxEnabled and ballModel and rootPart then
+            applyScale(ballModel, snapshot, rootPart, currentFactor, true, scaleVisualMeshEnabled)
+        end
+    end,
+})
+
+Tab:CreateSlider({
+    Name         = "Hitbox Scale",
+    Range        = {1, 25},
+    Increment    = 0.1,
+    Suffix       = "x",
+    CurrentValue = 1,
+    Flag         = "HitboxScale",
+    Callback     = function(value)
+        currentFactor = value
+        ScaleLabel:Set("Current Scale: " .. string.format("%.1f", value) .. "x")
+        if hitboxEnabled and ballModel and rootPart then
+            applyScale(ballModel, snapshot, rootPart, currentFactor, true, scaleVisualMeshEnabled)
+        end
+    end,
+})
+
+local function createPreset(name, factor)
+    Tab:CreateButton({
+        Name     = name,
+        Callback = function()
+            currentFactor = factor
+            ScaleLabel:Set("Current Scale: " .. string.format("%.1f", factor) .. "x")
+            if hitboxEnabled and ballModel and rootPart then
+                applyScale(ballModel, snapshot, rootPart, factor, true, scaleVisualMeshEnabled)
+            end
+            Rayfield:Notify({
+                Title   = "Preset Applied",
+                Content = "Scale set to " .. factor .. "x",
+                Duration = 2,
+            })
+        end,
+    })
+end
+
+createPreset("Small (1.5x)", 1.5)
+createPreset("Medium (3.0x)", 3.0)
+createPreset("Large (5.0x)", 5.0)
+createPreset("Huge (8.0x)", 8.0)
+createPreset("Giant (12.0x)", 12.0)
+createPreset("Massive (18.0x)", 18.0)
+createPreset("MAX (25.0x)", 25.0)
+
+Tab:CreateButton({
+    Name     = "Reset Hitbox",
+    Callback = function()
+        hitboxEnabled = false
+        currentFactor = 1
+        ScaleLabel:Set("Current Scale: 1.0x")
+        if ballModel and rootPart then
+            applyScale(ballModel, snapshot, rootPart, 1, false, true)
+        end
+        Rayfield:Notify({
+            Title    = "Hitbox Reset",
+            Content  = "All parts restored to original size.",
+            Duration = 3,
+        })
+    end,
+})
+
+-- ======================== Respawn Monitor ========================
+task.spawn(function()
+    while task.wait(MONITOR_INTERVAL) do
+        if not ballModel or not ballModel.Parent then
+            if refreshBall() then
+                StatusLabel:Set("Ball: " .. (ballModel and ballModel.Name or "Not Found"))
+                ScaleLabel:Set("Current Scale: " .. string.format("%.1f", currentFactor) .. "x")
+                Rayfield:Notify({
+                    Title   = "Ball Respawned",
+                    Content = "Override " .. (hitboxEnabled and "re-applied" or "disabled"),
+                    Duration = 3,
+                })
+                print("Ball respawned – override " .. (hitboxEnabled and "re-applied" or "disabled"))
+            end
+        end
+    end
+end)
+
+print("Ball Hitbox Adjuster loaded. Visual mesh scaling enabled by default.")
