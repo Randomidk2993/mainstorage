@@ -1,0 +1,189 @@
+local player = game.Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+local rootPart = character:WaitForChild("HumanoidRootPart")
+local ball = workspace:WaitForChild("Football")
+
+-- Goal Boxes
+local homeBox = workspace.AI.Home.DiveBox
+local awayBox = workspace.AI.Away.DiveBox
+
+-- GUI
+local gui = Instance.new("ScreenGui")
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local button = Instance.new("TextButton")
+button.Size = UDim2.new(0, 150, 0, 50)
+button.Position = UDim2.new(0, 10, 0.5, -25)
+button.Text = "GK Mode: OFF"
+button.Parent = gui
+
+-- GK Variables
+local gkMode = false
+local gkLoop = nil
+local ballCaught = false
+local lastBallVel = Vector3.new(0,0,0)
+
+-- Refresh character
+local function refreshCharacter()
+    if not character or not character.Parent then
+        character = player.Character or player.CharacterAdded:Wait()
+    end
+    humanoid = character:WaitForChild("Humanoid")
+    rootPart = character:WaitForChild("HumanoidRootPart")
+end
+
+-- Get team and dive box
+local function getTeam()
+    if player.Team then
+        if player.Team.Name == "Home" then
+            return "Home", homeBox
+        elseif player.Team.Name == "Away" then
+            return "Away", awayBox
+        end
+    end
+    return nil, nil
+end
+
+-- Dive Animations
+local success, controllers = pcall(function()
+    return game:GetService("ReplicatedStorage"):WaitForChild("Controllers")
+end)
+
+local diveAnimations = {}
+if success and controllers then
+    local animController = controllers:FindFirstChild("AnimationController")
+    if animController then
+        diveAnimations = {
+            Left = animController:FindFirstChild("DiveL"),
+            Right = animController:FindFirstChild("DiveR"),
+            Forward = animController:FindFirstChild("DiveF"),
+        }
+    end
+end
+
+local function dive(direction)
+    local anim = diveAnimations[direction]
+    if anim and anim:IsA("RemoteEvent") then
+        anim:Fire()
+    end
+end
+
+-- Predict ball X at GK Z plane with acceleration (curves)
+local function predictBallIntercept(ballPos, ballVel, goalZ, lastVel)
+    if ballVel.Z == 0 then return ballPos.X end
+    local time = (goalZ - ballPos.Z) / ballVel.Z
+    local accel = ballVel - lastVel
+    -- Physics-based prediction: s = v*t + 0.5*a*t^2
+    local predictedX = ballPos.X + ballVel.X * time + 0.5 * accel.X * time^2
+    local predictedY = ballPos.Y + ballVel.Y * time + 0.5 * accel.Y * time^2
+    return predictedX, predictedY, time
+end
+
+-- Main GK loop
+local function autoGK()
+    local lerpFactorXZ = 0.2
+    local reactionX = 38
+    local marginZ = 8
+    local minBallSpeed = 5
+    local handOffset = Vector3.new(0,3,2)
+    local gkReach = Vector3.new(6,5,2)
+
+    while gkMode do
+        refreshCharacter()
+        if not ball or not ball.Parent then
+            ball = workspace:WaitForChild("Football")
+        end
+
+        local team, diveBox = getTeam()
+        if not (team and diveBox and ball) then
+            task.wait(0.03)
+            continue
+        end
+
+        local boxPos = diveBox.Position
+        local ballPos = ball.Position
+        local ballVel = ball.AssemblyLinearVelocity
+
+        -- Only react to free balls
+        local ballFree = true
+        if ball:FindFirstChildWhichIsA("Weld") or ball:FindFirstChildWhichIsA("Motor6D") then
+            ballFree = false
+        end
+        if ballVel.Magnitude < 1 then
+            ballFree = false
+        end
+        if not ballFree then
+            task.wait(0.03)
+            continue
+        end
+
+        -- Only react to balls in range
+        local dx = ballPos.X - boxPos.X
+        local dz = ballPos.Z - boxPos.Z
+        if math.abs(dx) > reactionX or math.abs(dz) > (diveBox.Size.Z/2 + marginZ) then
+            task.wait(0.03)
+            continue
+        end
+
+        -- Predict intercept with curve correction
+        local predictedX, predictedY, timeToGoal = predictBallIntercept(ballPos, ballVel, boxPos.Z, lastBallVel)
+        lastBallVel = ballVel
+
+        -- Clamp predicted X/Z within goal box
+        local targetX = math.clamp(predictedX, boxPos.X - diveBox.Size.X/2, boxPos.X + diveBox.Size.X/2)
+        local targetZ = math.clamp(ballPos.Z, boxPos.Z - diveBox.Size.Z/2, boxPos.Z + diveBox.Size.Z/2)
+
+        -- Smooth horizontal movement
+        local newX = rootPart.Position.X + (targetX - rootPart.Position.X) * lerpFactorXZ
+        local newZ = rootPart.Position.Z + (targetZ - rootPart.Position.Z) * lerpFactorXZ
+        rootPart.CFrame = CFrame.new(newX, rootPart.Position.Y, newZ)
+
+        -- Decide dive direction
+        local xDiff = predictedX - rootPart.Position.X
+        local diveDirection = "Forward"
+        if math.abs(xDiff) > 2 then
+            diveDirection = (xDiff > 0) and "Right" or "Left"
+        end
+
+        -- Jump if ball is high
+        local handPos = rootPart.Position + handOffset
+        if predictedY > handPos.Y + 1 then
+            humanoid.Jump = true
+        end
+
+        -- Fire dive animation
+        dive(diveDirection)
+
+        -- Catch region
+        local inReach = math.abs(ballPos.X - handPos.X) <= gkReach.X/2 and
+                        math.abs(ballPos.Y - handPos.Y) <= gkReach.Y/2 and
+                        math.abs(ballPos.Z - handPos.Z) <= gkReach.Z/2
+
+        if inReach and not ballCaught then
+            ball.AssemblyLinearVelocity = Vector3.zero
+            ball.AssemblyAngularVelocity = Vector3.zero
+            ball.Position = handPos
+            ballCaught = true
+        elseif not inReach then
+            ballCaught = false
+        end
+
+        task.wait(0.03)
+    end
+end
+
+-- Toggle button
+button.MouseButton1Click:Connect(function()
+    gkMode = not gkMode
+    button.Text = gkMode and "GK Mode: ON" or "GK Mode: OFF"
+
+    if gkMode then
+        gkLoop = task.spawn(autoGK)
+    else
+        if gkLoop then
+            task.cancel(gkLoop)
+            gkLoop = nil
+        end
+    end
+end)
