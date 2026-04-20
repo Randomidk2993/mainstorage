@@ -1,0 +1,116 @@
+-- LocalScript
+local player = game.Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local ball = workspace:WaitForChild("Football")
+
+-- GUI setup
+local playerGui = player:WaitForChild("PlayerGui")
+local screenGui = playerGui:FindFirstChild("CustomGUI")
+if not screenGui then
+    screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "CustomGUI"
+    screenGui.Parent = playerGui
+end
+
+-- Ball Control Button
+local ballButton = Instance.new("TextButton")
+ballButton.Size = UDim2.new(0, 150, 0, 50)
+ballButton.Position = UDim2.new(0, 10, 0, 100)
+ballButton.Text = "Ball Control: OFF"
+ballButton.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+ballButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+ballButton.Font = Enum.Font.SourceSans
+ballButton.TextScaled = true
+ballButton.Parent = screenGui
+
+-- Services
+local userInputService = game:GetService("UserInputService")
+local runService = game:GetService("RunService")
+local camera = workspace.CurrentCamera
+
+local ballControlEnabled = false
+local ballLoop = nil
+local flySpeed = 150 -- fast enough to be uncatchable
+
+-- Save original camera
+local originalCameraSubject = camera.CameraSubject
+
+-- Function to restore everything
+local function restoreBallAndCamera()
+    camera.CameraSubject = originalCameraSubject
+    if ball and ball.Parent then
+        ball.AssemblyLinearVelocity = Vector3.zero
+        ball.CanCollide = true
+        ball.Massless = false
+        ball.Transparency = 0 -- visible
+    end
+end
+
+-- Ball control loop
+local function controlBall()
+    if not ball or not ball.Parent then return end
+
+    -- Attach camera to ball
+    camera.CameraSubject = ball
+
+    -- Make physics fully enabled
+    ball.CanCollide = true
+    ball.Massless = false
+    ball.Transparency = 0 -- visible
+
+    while ballControlEnabled and ball and ball.Parent do
+        -- Mouse world position
+        local mousePos = userInputService:GetMouseLocation()
+        local ray = camera:ScreenPointToRay(mousePos.X, mousePos.Y)
+        local targetPos = ray.Origin + ray.Direction * 50
+
+        -- Apply velocity toward target
+        local dir = (targetPos - ball.Position)
+        if dir.Magnitude > 0 then
+            ball.AssemblyLinearVelocity = dir.Unit * flySpeed
+        end
+
+        runService.RenderStepped:Wait()
+    end
+
+    -- Restore camera and ball
+    restoreBallAndCamera()
+end
+
+-- Toggle button
+ballButton.MouseButton1Click:Connect(function()
+    if not ball or (ball.Parent ~= character and not (ball.Parent == workspace)) then
+        warn("You must have the ball to control it!")
+        return
+    end
+
+    ballControlEnabled = not ballControlEnabled
+    ballButton.Text = ballControlEnabled and "Ball Control: ON" or "Ball Control: OFF"
+
+    if ballControlEnabled then
+        ballLoop = task.spawn(controlBall)
+    else
+        if ballLoop then
+            task.cancel(ballLoop)
+            ballLoop = nil
+        end
+        restoreBallAndCamera()
+    end
+end)
+
+-- Optional: stop control automatically when the game ends
+-- Replace this with your game's actual end signal
+local gameEnded = workspace:WaitForChild("GameEnded", 10)
+if gameEnded then
+    gameEnded.Changed:Connect(function()
+        if ballControlEnabled then
+            ballControlEnabled = false
+            if ballLoop then
+                task.cancel(ballLoop)
+                ballLoop = nil
+            end
+            restoreBallAndCamera()
+        end
+    end)
+end
+
