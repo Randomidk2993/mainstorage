@@ -1,0 +1,216 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local Character, RootPart, Humanoid
+
+local SPEED = 30
+local noclipActive = false
+local heartbeatConnection
+
+local function createGui()
+    local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "Noclip_" .. math.random(10000, 99999)
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = playerGui
+
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 120, 0, 30)
+    button.Position = UDim2.new(0, 10, 0, 10)
+    button.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    button.BackgroundTransparency = 0.5
+    button.TextColor3 = Color3.fromRGB(200, 200, 200)
+    button.Text = "Noclip: OFF"
+    button.Font = Enum.Font.SourceSansBold
+    button.TextSize = 14
+    button.BorderSizePixel = 0
+    button.AutoButtonColor = false
+    button.Parent = screenGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = button
+
+    -- Dragging logic
+    local dragging, dragStart, startPos
+    button.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = button.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    button.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - dragStart
+            button.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+
+    local function toggleNoclip()
+        noclipActive = not noclipActive
+        if noclipActive then
+            enableNoclip()
+            button.Text = "Noclip: ON"
+            button.BackgroundColor3 = Color3.fromRGB(70, 130, 70)
+        else
+            disableNoclip()
+            button.Text = "Noclip: OFF"
+            button.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+        end
+    end
+
+    button.MouseButton1Click:Connect(toggleNoclip)
+    _G.NoclipButton = button
+end
+local function neutralizeAntiTeleport()
+    -- These are the invisible trigger parts seen in the game dump
+    local triggerNames = {
+        "Region",
+        "Roof",          -- sometimes used as a kill barrier
+        "UnlockBase"     -- may have proximity prompts
+    }
+
+    for _, part in ipairs(Workspace:GetDescendants()) do
+        if part:IsA("BasePart") then
+            local name = part.Name
+            for _, target in ipairs(triggerNames) do
+                if name == target then
+                    -- Remove TouchInterest (stops touch teleports)
+                    for _, child in ipairs(part:GetChildren()) do
+                        if child:IsA("TouchTransmitter") then
+                            child:Destroy()
+                        end
+                    end
+                    part.CanCollide = false
+                    part.Transparency = 1
+                    -- part:Destroy()
+                end
+            end
+        end
+    end
+end
+
+function enableNoclip()
+    if not Character or not RootPart or not Humanoid then return end
+
+    -- Give client network ownership (reduces rubberbanding)
+    pcall(function()
+        RootPart:SetNetworkOwner(nil)
+    end)
+
+    -- Disable collisions on EVERY part of the character
+    for _, part in ipairs(Character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = false
+        end
+    end
+
+    -- Stop humanoid from auto‑rotating or interfering
+    Humanoid.AutoRotate = false
+
+    -- Zero out physics velocity
+    pcall(function()
+        RootPart.AssemblyLinearVelocity = Vector3.zero
+        RootPart.AssemblyAngularVelocity = Vector3.zero
+    end)
+
+    -- Neutralize teleport triggers
+    neutralizeAntiTeleport()
+
+    -- Start movement loop
+    if heartbeatConnection then heartbeatConnection:Disconnect() end
+    heartbeatConnection = RunService.Heartbeat:Connect(moveCharacter)
+end
+
+function disableNoclip()
+    if heartbeatConnection then
+        heartbeatConnection:Disconnect()
+        heartbeatConnection = nil
+    end
+
+    if not Character or not RootPart or not Humanoid then return end
+
+    -- Re‑enable collisions
+    for _, part in ipairs(Character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = true
+        end
+    end
+
+    Humanoid.AutoRotate = true
+
+    -- Small nudge to escape any wall overlap
+    pcall(function()
+        RootPart.CFrame = RootPart.CFrame + Vector3.new(0, 0.5, 0)
+        RootPart.AssemblyLinearVelocity = Vector3.zero
+    end)
+end
+
+function moveCharacter(deltaTime)
+    if not noclipActive or not RootPart or not Humanoid then return end
+
+    local moveDir = Humanoid.MoveDirection
+    if moveDir.Magnitude == 0 then
+        pcall(function()
+            RootPart.AssemblyLinearVelocity = Vector3.zero
+        end)
+        return
+    end
+
+    moveDir = moveDir.Unit
+    local moveDelta = moveDir * SPEED * deltaTime
+
+    pcall(function()
+        RootPart.CFrame = RootPart.CFrame + moveDelta
+        RootPart.AssemblyLinearVelocity = Vector3.zero
+        RootPart.AssemblyAngularVelocity = Vector3.zero
+    end)
+end
+
+local function onCharacterAdded(newChar)
+    Character = newChar
+    RootPart = newChar:WaitForChild("HumanoidRootPart")
+    Humanoid = newChar:WaitForChild("Humanoid")
+
+    -- Reset noclip state
+    if noclipActive then
+        noclipActive = false
+        if heartbeatConnection then heartbeatConnection:Disconnect() end
+        if _G.NoclipButton then
+            _G.NoclipButton.Text = "Noclip: OFF"
+            _G.NoclipButton.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+        end
+    end
+end
+
+if LocalPlayer.Character then
+    onCharacterAdded(LocalPlayer.Character)
+end
+LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
+
+task.wait(0.5)
+pcall(createGui)
+
+-- Optionally run neutralizer periodically (every 5 sec) in case triggers respawn
+task.spawn(function()
+    while true do
+        if noclipActive then
+            neutralizeAntiTeleport()
+        end
+        task.wait(5)
+    end
+end)
