@@ -1,0 +1,620 @@
+--[[
+    Brainrot Stealer GUI
+    Full featured: Steal, Zone Auto, Zones, Player Stats, Obstacles
+]]
+
+-- Load Rayfield
+local success, Rayfield = pcall(function()
+    return loadstring(game:HttpGet('https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/main/source.lua'))()
+end)
+
+if not success or not Rayfield then
+    warn("Rayfield failed to load.")
+    return
+end
+
+local player = game.Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+
+player.CharacterAdded:Connect(function(newChar)
+    character = newChar
+    humanoid = newChar:WaitForChild("Humanoid")
+end)
+
+local Window = Rayfield:CreateWindow({
+    Name = "Brainrot Stealer",
+    LoadingTitle = "Loading...",
+    LoadingSubtitle = "by your assistant",
+    ConfigurationSaving = { Enabled = false },
+    Discord = { Enabled = false },
+    KeySystem = false,
+})
+
+-- ═══════════════════════════════════════
+--  ZONE DEFINITIONS
+-- ═══════════════════════════════════════
+
+local ZONES = {
+    { key = "Zone1", label = "Common",    rarity = "common"   },
+    { key = "Zone2", label = "Uncommon",  rarity = "uncommon" },
+    { key = "Zone3", label = "Rare",      rarity = "rare"     },
+    { key = "Zone4", label = "Epic",      rarity = "epic"     },
+    { key = "Zone5", label = "Legendary", rarity = "legendary"},
+    { key = "Zone6", label = "Mythic",    rarity = "mythic"   },
+    { key = "Zone7", label = "Secret",    rarity = "secret"   },
+}
+
+-- Which zones are enabled for Zone Auto mode
+-- Default: all off
+local zoneEnabled = {
+    Zone1 = false,
+    Zone2 = false,
+    Zone3 = false,
+    Zone4 = false,
+    Zone5 = false,
+    Zone6 = false,
+    Zone7 = false,
+}
+
+-- ═══════════════════════════════════════
+--  SHARED HELPERS
+-- ═══════════════════════════════════════
+
+local myPlotNumber = 1
+local holdDuration = 1.0
+
+local function getPlayerBase()
+    local plotName = "Plot" .. myPlotNumber
+    local plot = workspace:FindFirstChild("Plots")
+        and workspace.Plots:FindFirstChild(plotName)
+    if not plot then return nil end
+    if plot:IsA("BasePart") then return plot end
+    for _, child in ipairs(plot:GetDescendants()) do
+        if child:IsA("BasePart") then return child end
+    end
+    return nil
+end
+
+local function getBrainrotRarity(model)
+    local root = model:FindFirstChild("Root")
+    if not root then return "" end
+    local billboard = root:FindFirstChild("BillboardGui")
+    if not billboard then return "" end
+    local rarityLabel = billboard:FindFirstChild("Rarity")
+    if not rarityLabel then return "" end
+    return rarityLabel.Text:lower():gsub("%s+", "")
+end
+
+-- Returns all valid brainrots in Wild, optionally filtered to a specific rarity
+-- filterRarity = nil means return all
+-- filterRarity = "rare" means only return brainrots of that rarity
+local function getWildBrainrots(filterRarity)
+    local wildFolder = workspace:FindFirstChild("Wild")
+    local result = {}
+    if not wildFolder then return result end
+
+    for _, model in ipairs(wildFolder:GetChildren()) do
+        local root = model:FindFirstChild("Root")
+        if root and root:IsA("BasePart") then
+            local prompt = root:FindFirstChild("CarryPrompt")
+            if prompt and prompt:IsA("ProximityPrompt") then
+                local rarity = getBrainrotRarity(model)
+                if not filterRarity or rarity == filterRarity then
+                    result[model.Name] = { root = root, prompt = prompt, rarity = rarity }
+                end
+            end
+        end
+    end
+    return result
+end
+
+-- All brainrots, no filter (for manual dropdown)
+local function getWildBrainrotsAll()
+    return getWildBrainrots(nil)
+end
+
+local function getBrainrotNames(brainrotTable)
+    local names = {}
+    for name, _ in pairs(brainrotTable) do
+        table.insert(names, name)
+    end
+    table.sort(names)
+    if #names == 0 then table.insert(names, "None found") end
+    return names
+end
+
+local function pickRandom(brainrotTable)
+    local keys = {}
+    for name, _ in pairs(brainrotTable) do
+        table.insert(keys, name)
+    end
+    if #keys == 0 then return nil end
+    return keys[math.random(1, #keys)]
+end
+
+local function getZonePart(zoneKey)
+    return workspace:FindFirstChild("Zones")
+        and workspace.Zones:FindFirstChild("Spawn")
+        and workspace.Zones.Spawn:FindFirstChild(zoneKey)
+end
+
+local function getHubPart(name)
+    return workspace:FindFirstChild("MAIN_ARIGATO")
+        and workspace.MAIN_ARIGATO:FindFirstChild("parts")
+        and workspace.MAIN_ARIGATO.parts:FindFirstChild(name)
+end
+
+-- Teleport HRP to a BasePart, offset Y
+local function teleportTo(part, offsetY)
+    local char = player.Character or player.CharacterAdded:Wait()
+    local hrp = char:WaitForChild("HumanoidRootPart")
+    local cframe = nil
+
+    if part:IsA("BasePart") then
+        cframe = part.CFrame
+    elseif part:IsA("Model") and part.PrimaryPart then
+        cframe = part.PrimaryPart.CFrame
+    else
+        for _, c in ipairs(part:GetDescendants()) do
+            if c:IsA("BasePart") then cframe = c.CFrame break end
+        end
+    end
+
+    if cframe then
+        hrp.CFrame = cframe * CFrame.new(0, offsetY or 4, 0)
+        return true
+    end
+    return false
+end
+
+-- ═══════════════════════════════════════
+--  CORE STEAL FUNCTION
+-- ═══════════════════════════════════════
+
+local function doSteal(targetName, silentReturn)
+    if not targetName or targetName == "" or targetName == "None found" then
+        return false, "No brainrot selected."
+    end
+
+    local wildFolder = workspace:FindFirstChild("Wild")
+    if not wildFolder then return false, "Wild folder not found." end
+
+    local rootPart, carryPrompt = nil, nil
+    for _, model in ipairs(wildFolder:GetChildren()) do
+        if model.Name:lower() == targetName:lower() then
+            local root = model:FindFirstChild("Root")
+            if root and root:IsA("BasePart") then
+                local prompt = root:FindFirstChild("CarryPrompt")
+                if prompt and prompt:IsA("ProximityPrompt") then
+                    rootPart = root
+                    carryPrompt = prompt
+                    break
+                end
+            end
+        end
+    end
+
+    if not rootPart then return false, "'" .. targetName .. "' not in Wild." end
+    if not carryPrompt then return false, "No CarryPrompt on Root." end
+
+    local char = player.Character or player.CharacterAdded:Wait()
+    local hrp = char:WaitForChild("HumanoidRootPart")
+
+    hrp.CFrame = rootPart.CFrame * CFrame.new(0, 2, 0)
+    task.wait(0.2)
+
+    carryPrompt:InputHoldBegin()
+    task.wait(holdDuration)
+    carryPrompt:InputHoldEnd()
+    task.wait(0.2)
+
+    local basePart = getPlayerBase()
+    if basePart then
+        hrp.CFrame = basePart.CFrame * CFrame.new(0, 4, 0)
+        return true, "Stolen & returned to Plot " .. myPlotNumber .. "!"
+    else
+        return true, "Picked up but Plot " .. myPlotNumber .. " not found."
+    end
+end
+
+-- ═══════════════════════════════════════
+--  TAB 1: Auto Steal  (random Rare+, no zone logic)
+-- ═══════════════════════════════════════
+local StealTab = Window:CreateTab("Auto Steal", 4483345998)
+
+local IGNORED_RARITIES_AUTO = {
+    ["common"] = true, ["uncommon"] = true, ["epic"] = true,
+}
+
+local selectedBrainrot = ""
+local manualBrainrotName = ""
+local cachedBrainrots = getWildBrainrotsAll()
+local autoModeEnabled = false
+
+local function getManualTarget()
+    return (selectedBrainrot ~= "" and selectedBrainrot ~= "None found")
+        and selectedBrainrot or manualBrainrotName
+end
+
+local function startAutoMode()
+    task.spawn(function()
+        Rayfield:Notify({
+            Title = "Auto Mode ON",
+            Content = "Stealing random Rare+ brainrots.",
+            Duration = 3,
+            Image = 4483345998,
+        })
+
+        while autoModeEnabled do
+            -- Scan Wild, skip common/uncommon/epic
+            local all = getWildBrainrotsAll()
+            local filtered = {}
+            for name, data in pairs(all) do
+                if not IGNORED_RARITIES_AUTO[data.rarity] then
+                    filtered[name] = data
+                end
+            end
+
+            if next(filtered) == nil then
+                task.wait(2)
+            else
+                local target = pickRandom(filtered)
+                if target then
+                    doSteal(target, true)
+                    task.wait(0.5)
+                end
+            end
+        end
+
+        Rayfield:Notify({ Title = "Auto Mode OFF", Content = "Loop stopped.", Duration = 3, Image = 4483345998 })
+    end)
+end
+
+StealTab:CreateDropdown({
+    Name = "My Base Plot",
+    Options = {"Plot 1", "Plot 2", "Plot 3", "Plot 4", "Plot 5"},
+    CurrentOption = {"Plot 1"},
+    MultipleOptions = false,
+    Flag = "PlotSelector",
+    Callback = function(Options)
+        myPlotNumber = tonumber(Options[1]:match("%d+")) or 1
+    end,
+})
+
+StealTab:CreateInput({
+    Name = "Brainrot Name (manual)",
+    PlaceholderText = "e.g. Lirili Larila",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text) manualBrainrotName = Text end,
+})
+
+StealTab:CreateSlider({
+    Name = "Hold Duration (seconds)",
+    Range = {0.1, 3},
+    Increment = 0.1,
+    Suffix = "s",
+    CurrentValue = 1.0,
+    Flag = "HoldDuration",
+    Callback = function(Value) holdDuration = Value end,
+})
+
+local BrainrotDropdown = StealTab:CreateDropdown({
+    Name = "Wild Brainrots",
+    Options = getBrainrotNames(cachedBrainrots),
+    CurrentOption = {"Select one..."},
+    MultipleOptions = false,
+    Flag = "BrainrotDropdown",
+    Callback = function(Options) selectedBrainrot = Options[1] end,
+})
+
+StealTab:CreateButton({
+    Name = "↻ Refresh Brainrot List",
+    Callback = function()
+        cachedBrainrots = getWildBrainrotsAll()
+        local fresh = getBrainrotNames(cachedBrainrots)
+        pcall(function() BrainrotDropdown:Refresh(fresh, true) end)
+        Rayfield:Notify({ Title = "Refreshed", Content = #fresh .. " brainrot(s) found.", Duration = 2, Image = 4483345998 })
+    end,
+})
+
+StealTab:CreateButton({
+    Name = "Teleport & Steal (Once)",
+    Callback = function()
+        if autoModeEnabled then
+            Rayfield:Notify({ Title = "Auto Active", Content = "Stop Auto first.", Duration = 3, Image = 4483345998 })
+            return
+        end
+        local ok, msg = doSteal(getManualTarget())
+        Rayfield:Notify({ Title = ok and "Success" or "Failed", Content = msg, Duration = 3, Image = 4483345998 })
+    end,
+})
+
+StealTab:CreateToggle({
+    Name = "Auto Mode  [Skips Common / Uncommon / Epic]",
+    CurrentValue = false,
+    Flag = "AutoMode",
+    Callback = function(Value)
+        autoModeEnabled = Value
+        if Value then startAutoMode() end
+    end,
+})
+
+StealTab:CreateLabel("Auto picks random Rare+ brainrots. Manual steal ignores rarity.")
+
+-- ═══════════════════════════════════════
+--  TAB 2: Zone Auto Mode
+-- ═══════════════════════════════════════
+local ZoneAutoTab = Window:CreateTab("Zone Auto", 4483345998)
+
+local zoneAutoEnabled = false
+
+-- Per-zone toggle callbacks
+for _, zone in ipairs(ZONES) do
+    ZoneAutoTab:CreateToggle({
+        Name = zone.label,
+        CurrentValue = false,
+        Flag = "ZoneToggle_" .. zone.key,
+        Callback = function(Value)
+            zoneEnabled[zone.key] = Value
+        end,
+    })
+end
+
+-- The zone auto loop:
+-- 1. Build list of enabled zones
+-- 2. For each enabled zone in order:
+--    a. Teleport to the zone spawn point
+--    b. Wait a moment for brainrots to be visible
+--    c. Scan Wild for brainrots matching that zone's rarity
+--    d. If found, pick random one and steal it (returns to base after)
+--    e. Move to next enabled zone
+-- 3. Repeat from top until stopped
+
+local function startZoneAutoMode()
+    task.spawn(function()
+        Rayfield:Notify({
+            Title = "Zone Auto ON",
+            Content = "Cycling enabled zones.",
+            Duration = 3,
+            Image = 4483345998,
+        })
+
+        while zoneAutoEnabled do
+            -- Collect currently enabled zones
+            local activeZones = {}
+            for _, zone in ipairs(ZONES) do
+                if zoneEnabled[zone.key] then
+                    table.insert(activeZones, zone)
+                end
+            end
+
+            if #activeZones == 0 then
+                -- Nothing enabled, idle
+                task.wait(2)
+            else
+                for _, zone in ipairs(activeZones) do
+                    if not zoneAutoEnabled then break end
+
+                    -- Teleport to this zone's spawn
+                    local zonePart = getZonePart(zone.key)
+                    if zonePart then
+                        teleportTo(zonePart, 4)
+                        task.wait(0.5) -- settle and let Wild update
+                    end
+
+                    -- Scan Wild for brainrots matching this zone's rarity
+                    local matching = getWildBrainrots(zone.rarity)
+
+                    if next(matching) ~= nil then
+                        local target = pickRandom(matching)
+                        if target then
+                            -- Notify which rarity we're stealing
+                            Rayfield:Notify({
+                                Title = "Zone Auto",
+                                Content = "Stealing " .. zone.label .. ": " .. target,
+                                Duration = 2,
+                                Image = 4483345998,
+                            })
+                            doSteal(target, true)
+                            task.wait(0.5)
+                        end
+                    else
+                        -- Nothing of this rarity right now, move on
+                        task.wait(0.3)
+                    end
+                end
+            end
+        end
+
+        Rayfield:Notify({ Title = "Zone Auto OFF", Content = "Loop stopped.", Duration = 3, Image = 4483345998 })
+    end)
+end
+
+ZoneAutoTab:CreateToggle({
+    Name = "Start Zone Auto",
+    CurrentValue = false,
+    Flag = "ZoneAutoMode",
+    Callback = function(Value)
+        zoneAutoEnabled = Value
+        if Value then
+            -- Require at least one zone enabled
+            local anyEnabled = false
+            for _, v in pairs(zoneEnabled) do
+                if v then anyEnabled = true break end
+            end
+            if not anyEnabled then
+                Rayfield:Notify({
+                    Title = "No Zones Selected",
+                    Content = "Enable at least one zone above.",
+                    Duration = 3,
+                    Image = 4483345998,
+                })
+                zoneAutoEnabled = false
+                return
+            end
+            startZoneAutoMode()
+        end
+    end,
+})
+
+ZoneAutoTab:CreateLabel("Toggle zones above, then Start. Disabled zones are fully skipped.")
+
+-- ═══════════════════════════════════════
+--  TAB 3: Zone Teleport (manual)
+-- ═══════════════════════════════════════
+local ZoneTab = Window:CreateTab("Zones", 4483345998)
+
+local ZONE_LABELS_MAP = {}
+for _, z in ipairs(ZONES) do
+    ZONE_LABELS_MAP["Zone " .. z.key:match("%d+") .. " - " .. z.label] = z.key
+end
+
+local zoneOptions = {}
+for label, _ in pairs(ZONE_LABELS_MAP) do
+    table.insert(zoneOptions, label)
+end
+table.sort(zoneOptions)
+
+local hubZoneNames = {
+    "Hub - Carry", "Hub - Group", "Hub - Index", "Hub - MaxFuel",
+    "Hub - Rebirth", "Hub - Sell", "Hub - Shop", "Hub - Speed", "Hub - Spins",
+    "My Base"
+}
+for _, name in ipairs(hubZoneNames) do
+    table.insert(zoneOptions, name)
+end
+
+local selectedZone = ""
+
+ZoneTab:CreateDropdown({
+    Name = "Select Zone",
+    Options = zoneOptions,
+    CurrentOption = {"Select a zone..."},
+    MultipleOptions = false,
+    Flag = "ZoneDropdown",
+    Callback = function(Options) selectedZone = Options[1] end,
+})
+
+ZoneTab:CreateButton({
+    Name = "Teleport to Zone",
+    Callback = function()
+        if selectedZone == "" then
+            Rayfield:Notify({ Title = "Error", Content = "Select a zone first.", Duration = 3, Image = 4483345998 })
+            return
+        end
+
+        local char = player.Character or player.CharacterAdded:Wait()
+        local hrp = char:WaitForChild("HumanoidRootPart")
+        local targetCFrame = nil
+
+        local zoneKey = ZONE_LABELS_MAP[selectedZone]
+        if zoneKey then
+            local zonePart = getZonePart(zoneKey)
+            if zonePart then
+                if zonePart:IsA("BasePart") then
+                    targetCFrame = zonePart.CFrame
+                else
+                    for _, c in ipairs(zonePart:GetDescendants()) do
+                        if c:IsA("BasePart") then targetCFrame = c.CFrame break end
+                    end
+                end
+            end
+        elseif selectedZone == "My Base" then
+            local base = getPlayerBase()
+            if base then targetCFrame = base.CFrame end
+        else
+            local hubName = selectedZone:match("Hub %- (.+)")
+            if hubName then
+                local part = getHubPart(hubName)
+                if part and part:IsA("BasePart") then targetCFrame = part.CFrame end
+            end
+        end
+
+        if not targetCFrame then
+            Rayfield:Notify({ Title = "Not Found", Content = "Could not locate '" .. selectedZone .. "'.", Duration = 4, Image = 4483345998 })
+            return
+        end
+
+        hrp.CFrame = targetCFrame * CFrame.new(0, 4, 0)
+        Rayfield:Notify({ Title = "Teleported!", Content = "Arrived at " .. selectedZone, Duration = 2, Image = 4483345998 })
+    end,
+})
+
+ZoneTab:CreateLabel("Zone 1=Common  2=Uncommon  3=Rare  4=Epic  5=Legendary  6=Mythic  7=Secret")
+
+-- ═══════════════════════════════════════
+--  TAB 4: Player Stats
+-- ═══════════════════════════════════════
+local StatsTab = Window:CreateTab("Player Stats", 4483345998)
+
+StatsTab:CreateSlider({
+    Name = "Walk Speed",
+    Range = {16, 500},
+    Increment = 1,
+    Suffix = "",
+    CurrentValue = 16,
+    Flag = "WalkSpeed",
+    Callback = function(Value)
+        local char = player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then hum.WalkSpeed = Value end
+    end,
+})
+
+StatsTab:CreateSlider({
+    Name = "Jump Power",
+    Range = {50, 500},
+    Increment = 1,
+    Suffix = "",
+    CurrentValue = 50,
+    Flag = "JumpPower",
+    Callback = function(Value)
+        local char = player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.JumpPower = Value
+            pcall(function() hum.JumpHeight = Value end)
+        end
+    end,
+})
+
+StatsTab:CreateLabel("Adjustments reset on respawn — re-apply if needed.")
+
+-- ═══════════════════════════════════════
+--  TAB 5: Misc
+-- ═══════════════════════════════════════
+local MiscTab = Window:CreateTab("Misc", 4483345998)
+
+local deleteObstaclesEnabled = false
+
+local function startDeletingObstacles()
+    task.spawn(function()
+        while deleteObstaclesEnabled do
+            local fx = workspace:FindFirstChild("Fx")
+            if fx then
+                for _, obj in ipairs(fx:GetChildren()) do
+                    pcall(function() obj:Destroy() end)
+                end
+            end
+            task.wait(0.1)
+        end
+    end)
+end
+
+MiscTab:CreateToggle({
+    Name = "Delete Obstacles",
+    CurrentValue = false,
+    Flag = "DeleteObstacles",
+    Callback = function(Value)
+        deleteObstaclesEnabled = Value
+        if Value then
+            startDeletingObstacles()
+            Rayfield:Notify({ Title = "Obstacles", Content = "Now deleting Workspace.Fx contents.", Duration = 3, Image = 4483345998 })
+        else
+            Rayfield:Notify({ Title = "Obstacles", Content = "Stopped deleting obstacles.", Duration = 3, Image = 4483345998 })
+        end
+    end,
+})
+
+MiscTab:CreateLabel("Delete Obstacles clears Workspace.Fx every 0.1s.")
