@@ -108,7 +108,12 @@ local scripts = {
         name = "FE Noclip",
         placeId = nil,
         url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/fenoclip"
-    }
+    },
+    {
+        name = "test",
+        placeId = 18668065416,
+        url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/semiautogk"
+    },
 }
 
 -- ================== CREATE BUTTONS ==================
