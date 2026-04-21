@@ -24,30 +24,46 @@ local LoaderTab = Window:CreateTab("Loader", 4483362458)
 -- Services
 local SoundService = game:GetService("SoundService")
 
--- Helper: get current PlaceId
-local function getCurrentPlaceId()
-    return game.PlaceId
+-- Helper: normalize placeId to a table
+local function toIdList(val)
+    if val == nil then return nil end
+    if type(val) == "table" then return val end
+    return { val }
 end
 
--- Load script with GameId/PlaceId check
+-- Check if a value exists in a table
+local function tableContains(t, value)
+    for _, v in ipairs(t) do
+        if v == value then return true end
+    end
+    return false
+end
+
+-- Load script with PlaceId check (supports single ID or table of IDs)
 local function loadScript(scriptName, expectedPlaceId, scriptUrl)
-    local currentId = getCurrentPlaceId()
-    
-    if expectedPlaceId and currentId ~= expectedPlaceId then
+    local placeIdList = toIdList(expectedPlaceId)
+    local currentPlaceId = game.PlaceId
+
+    if placeIdList and not tableContains(placeIdList, currentPlaceId) then
         Rayfield:Notify({
             Title = "Wrong Game",
-            Content = string.format("%s requires PlaceId %d\nCurrent PlaceId: %d", scriptName, expectedPlaceId, currentId),
+            Content = string.format(
+                "%s requires PlaceId(s): %s\nYour PlaceId: %d",
+                scriptName,
+                table.concat(placeIdList, ", "),
+                currentPlaceId
+            ),
             Duration = 6,
             Image = 4483362458
         })
         return
     end
 
-    local success, err = pcall(function()
+    local ok, err = pcall(function()
         loadstring(game:HttpGet(scriptUrl))()
     end)
 
-    if not success then
+    if not ok then
         Rayfield:Notify({
             Title = "Script Error",
             Content = "Execution failed: " .. tostring(err),
@@ -62,7 +78,7 @@ local function loadScript(scriptName, expectedPlaceId, scriptUrl)
             Image = 4483362458
         })
         pcall(function()
-            SoundService:PlayLocalSound(SoundService, "rbxassetid://9120386436") -- Success chime
+            SoundService:PlayLocalSound(SoundService, "rbxassetid://9120386436")
         end)
     end
 end
@@ -96,12 +112,12 @@ local scripts = {
     },
     {
         name = "Bluelock Control Ball",
-        placeId = 18668065416,
+        placeId = {18668065416, 115110570222234},
         url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/ballcontrol"
     },
     {
         name = "Bluelock Semi-Auto GK",
-        placeId = 18668065416,
+        placeId = {18668065416, 115110570222234},
         url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/semiautogk"
     },
     {
