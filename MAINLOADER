@@ -21,17 +21,169 @@ local Window = Rayfield:CreateWindow({
 -- Create Loader tab
 local LoaderTab = Window:CreateTab("Loader", 4483362458)
 
+-- Create Join Checker tab
+local JoinCheckerTab = Window:CreateTab("Join Checker", 4483362458)
+
 -- Services
 local SoundService = game:GetService("SoundService")
+local Players = game:GetService("Players")
 
--- Helper: normalize placeId to a table
+-- ================== WATCHED USER IDS ==================
+-- Add the UserIds you want to monitor here
+local watchedUserIds = {
+    2959879240,   -- Replace with real UserIds
+    987654321,
+    111222333,
+}
+
+-- ================== JOIN CHECKER STATE ==================
+local joinCheckerEnabled = false
+local checkerRunning = false
+local alreadyNotified = {}
+
+-- ================== CHECKER LOGIC ==================
+local function runJoinChecker()
+    local currentPlayers = Players:GetPlayers()
+    local currentIds = {}
+    for _, player in ipairs(currentPlayers) do
+        currentIds[player.UserId] = player.Name
+    end
+
+    for _, watchedId in ipairs(watchedUserIds) do
+        local playerName = currentIds[watchedId]
+
+        if playerName then
+            -- Player is in-game, notify only once until they leave
+            if not alreadyNotified[watchedId] then
+                alreadyNotified[watchedId] = true
+
+                Rayfield:Notify({
+                    Title = "🚨 PRC MODERATOR IN-GAME!",
+                    Content = string.format("%s (ID: %d) is in your game!", playerName, watchedId),
+                    Duration = 180,
+                    Image = 4483362458
+                })
+                warn(string.format("[JoinChecker] PRC MODERATOR ALERT: %s (UserId: %d) has joined!", playerName, watchedId))
+            end
+        else
+            -- Player not found, if they were notified before they've now left
+            if alreadyNotified[watchedId] then
+                alreadyNotified[watchedId] = nil
+
+                local leftName = "PRC Moderator"
+                pcall(function()
+                    leftName = Players:GetNameFromUserIdAsync(watchedId)
+                end)
+
+                Rayfield:Notify({
+                    Title = "✅ PRC Moderator Left",
+                    Content = string.format("%s (ID: %d) has left the game.", leftName, watchedId),
+                    Duration = 999,
+                    Image = 4483362458
+                })
+                warn(string.format("[JoinChecker] %s (UserId: %d) has left.", leftName, watchedId))
+            end
+        end
+    end
+end
+
+local function startChecker()
+    if checkerRunning then return end
+    checkerRunning = true
+    alreadyNotified = {}
+
+    task.spawn(function()
+        while checkerRunning and joinCheckerEnabled do
+            local ok, err = pcall(runJoinChecker)
+            if not ok then
+                warn("[JoinChecker] Error during scan: " .. tostring(err))
+            end
+            task.wait(2)
+        end
+        checkerRunning = false
+    end)
+end
+
+local function stopChecker()
+    joinCheckerEnabled = false
+    checkerRunning = false
+    alreadyNotified = {}
+end
+
+-- ================== JOIN CHECKER UI ==================
+JoinCheckerTab:CreateSection("PRC Moderator Watcher")
+
+JoinCheckerTab:CreateParagraph({
+    Title = "How It Works",
+    Content = "Checks every 2 seconds for watched UserIds in the server. Notifies you once when they join and once when they leave. Dismiss alerts manually with X."
+})
+
+JoinCheckerTab:CreateToggle({
+    Name = "Enable Join Checker",
+    CurrentValue = false,
+    Flag = "JoinCheckerToggle",
+    Callback = function(value)
+        joinCheckerEnabled = value
+        if value then
+            startChecker()
+            Rayfield:Notify({
+                Title = "Join Checker ON",
+                Content = "Now monitoring " .. #watchedUserIds .. " user(s) every 2 seconds.",
+                Duration = 3,
+                Image = 4483362458
+            })
+            warn("[JoinChecker] Started. Monitoring " .. #watchedUserIds .. " user(s).")
+        else
+            stopChecker()
+            Rayfield:Notify({
+                Title = "Join Checker OFF",
+                Content = "Monitoring has been disabled.",
+                Duration = 3,
+                Image = 4483362458
+            })
+            warn("[JoinChecker] Stopped.")
+        end
+    end
+})
+
+JoinCheckerTab:CreateButton({
+    Name = "Manual Scan",
+    Callback = function()
+        if not joinCheckerEnabled then
+            Rayfield:Notify({
+                Title = "Checker Disabled",
+                Content = "Enable Join Checker first before scanning.",
+                Duration = 3,
+                Image = 4483362458
+            })
+            return
+        end
+        local ok, err = pcall(runJoinChecker)
+        if ok then
+            Rayfield:Notify({
+                Title = "Scan Complete",
+                Content = "Manual scan finished.",
+                Duration = 2,
+                Image = 4483362458
+            })
+        else
+            Rayfield:Notify({
+                Title = "Scan Error",
+                Content = tostring(err),
+                Duration = 4,
+                Image = 4483362458
+            })
+        end
+    end
+})
+
+-- ================== LOADER LOGIC ==================
 local function toIdList(val)
     if val == nil then return nil end
     if type(val) == "table" then return val end
     return { val }
 end
 
--- Check if a value exists in a table
 local function tableContains(t, value)
     for _, v in ipairs(t) do
         if v == value then return true end
@@ -39,7 +191,6 @@ local function tableContains(t, value)
     return false
 end
 
--- Load script with PlaceId check (supports single ID or table of IDs)
 local function loadScript(scriptName, expectedPlaceId, scriptUrl)
     local placeIdList = toIdList(expectedPlaceId)
     local currentPlaceId = game.PlaceId
