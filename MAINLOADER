@@ -31,9 +31,21 @@ local Players = game:GetService("Players")
 -- ================== WATCHED USER IDS ==================
 -- Add the UserIds you want to monitor here
 local watchedUserIds = {
-    2959879240,   -- Replace with real UserIds
-    987654321,
-    111222333,
+    125437390,
+    500161865,
+    52709422,
+    145414138,
+    387574627,
+    859531742,
+    54249787,
+    90379823,
+    406165948,
+    75669309,
+    1079064859,
+    69778525,
+    31006826,
+    77573259,
+    50972013,
 }
 
 -- ================== JOIN CHECKER STATE ==================
