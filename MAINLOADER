@@ -289,6 +289,11 @@ local scripts = {
         url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/fly"
     },
     {
+        name = "Emotes (BUNDLES BUGGED)",
+        placeId = nil,
+        url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/emotes"
+    },
+    {
         name = "Volleyball Legends Hitbox Expander",
         placeId = 73956553001240,
         url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/volleyballlegendshitbox"
