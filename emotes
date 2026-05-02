@@ -1,0 +1,1028 @@
+-- ============================================================
+--  🤪 GOOFY ANIM HUB  v10
+--  Emotes  : HumanoidDescription bypass (any game)
+--  Loco    : Catalog API bundle resolver + correct sync method:
+--              1. Write IDs into Animate folder (source of truth)
+--              2. Stop currently playing loco tracks so Animate
+--                 script is forced to re-load from folder on next
+--                 cycle — this is what actually replicates
+--              3. ApplyDescription as a second layer for clients
+--                 that watch HumDesc instead of Animator events
+--  Speed   : Heartbeat AdjustSpeed loop
+--  Freeze  : Forces emote to keep playing even while walking
+-- ============================================================
+
+local ok0, Rayfield = pcall(function()
+    return loadstring(game:HttpGet(
+        "https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/main/source.lua"
+    ))()
+end)
+if not ok0 or not Rayfield then warn("[GoofyHub] Rayfield failed") return end
+
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local LP          = Players.LocalPlayer
+
+-- ──────────────────────────────────────────────────────────
+--  REFS
+-- ──────────────────────────────────────────────────────────
+local Char, Hum, HumDesc, Animator, Animate
+
+local function refresh()
+    Char     = LP.Character
+    if not Char then return false end
+    Hum      = Char:FindFirstChildOfClass("Humanoid")
+    HumDesc  = Hum  and Hum:FindFirstChildOfClass("HumanoidDescription")
+    Animator = Hum  and Hum:FindFirstChildOfClass("Animator")
+    Animate  = Char:FindFirstChild("Animate")
+    return Hum ~= nil
+end
+refresh()
+
+-- ──────────────────────────────────────────────────────────
+--  BUNDLE → ANIMATION RESOLVER  (Catalog API + GetObjects)
+-- ──────────────────────────────────────────────────────────
+local bundleCache = {}
+
+local LOCO_KEYWORDS = {
+    walk  = { "walk" },
+    run   = { "run"  },
+    idle  = { "idle" },
+    jump  = { "jump" },
+    fall  = { "fall", "falling" },
+    climb = { "climb" },
+    swim  = { "swim"  },
+}
+
+local function matchCategory(name)
+    local low = name:lower()
+    for cat, keys in pairs(LOCO_KEYWORDS) do
+        for _, k in ipairs(keys) do
+            if low:find(k) then return cat end
+        end
+    end
+    return nil
+end
+
+local function extractId(str)
+    return str and tostring(str):match("%d+")
+end
+
+local function harvestAnimations(root, result)
+    local function recurse(inst)
+        if inst:IsA("Animation") then
+            local animId = extractId(inst.AnimationId)
+            if animId then
+                local cat = matchCategory(inst.Name)
+                         or (inst.Parent and matchCategory(inst.Parent.Name))
+                if cat and not result[cat] then
+                    result[cat] = animId
+                end
+            end
+        end
+        for _, child in ipairs(inst:GetChildren()) do recurse(child) end
+    end
+    recurse(root)
+end
+
+local function fetchBundleAssetIds(bundleId)
+    local url = "https://catalog.roblox.com/v1/bundles/" .. tostring(bundleId) .. "/details"
+    local ok, raw = pcall(function() return game:HttpGet(url) end)
+    if not ok or not raw then
+        warn("[GoofyHub] HttpGet failed for bundle " .. tostring(bundleId))
+        return nil
+    end
+    local ok2, data = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not ok2 or not data then
+        warn("[GoofyHub] JSON decode failed for bundle " .. tostring(bundleId))
+        return nil
+    end
+    local assetIds = {}
+    if data.items then
+        for _, item in ipairs(data.items) do
+            if item.type == "Asset" and item.id then
+                table.insert(assetIds, tostring(item.id))
+            end
+        end
+    end
+    if #assetIds == 0 then
+        warn("[GoofyHub] Bundle " .. tostring(bundleId) .. " returned no asset items.")
+    end
+    return assetIds
+end
+
+local function resolveBundle(bundleId)
+    local id = tostring(bundleId)
+    if bundleCache[id] then return bundleCache[id] end
+    local result = {}
+    local assetIds = fetchBundleAssetIds(id)
+    if not assetIds or #assetIds == 0 then
+        bundleCache[id] = result
+        return result
+    end
+    for _, assetId in ipairs(assetIds) do
+        local ok, objs = pcall(function()
+            return game:GetObjects("rbxassetid://" .. assetId)
+        end)
+        if ok and objs then
+            for _, obj in ipairs(objs) do
+                harvestAnimations(obj, result)
+                pcall(function() obj:Destroy() end)
+            end
+        end
+    end
+    bundleCache[id] = result
+    return result
+end
+
+-- ──────────────────────────────────────────────────────────
+--  LOCO ANIM SETTER
+--
+--  The correct sync strategy (confirmed by how Roblox's own
+--  Animate LocalScript works):
+--
+--  1. Write the new AnimationId into the Animate folder child.
+--     The Animate script reads these values when it decides
+--     which animation to play — this is the source of truth.
+--
+--  2. Stop every currently-playing loco track on the Animator.
+--     This forces the Animate script's internal state machine
+--     to re-enter, re-read the folder IDs, load a fresh track,
+--     and call :Play() — which fires a replication event that
+--     OTHER clients actually see via their Animator listeners.
+--
+--  3. Also call ApplyDescription so the HumDesc properties
+--     match, covering any client that watches HumDesc changes
+--     rather than Animator events (some custom rigs do this).
+--     We do NOT rely on ApplyDescription alone for replication
+--     because in server-auth games the server rejects it.
+--
+--  Reset works identically — write DEFAULT_LOCO IDs then stop
+--  tracks, so other clients see your character snap back to
+--  default animations immediately.
+-- ──────────────────────────────────────────────────────────
+local DEFAULT_LOCO = {
+    walk  = 507777826,
+    run   = 507767714,
+    idle  = 507766388,
+    jump  = 507765000,
+    fall  = 507767968,
+    climb = 507765644,
+}
+
+local DESC_PROP = {
+    walk  = "WalkAnimationId",
+    run   = "RunAnimationId",
+    idle  = "IdleAnimationId",
+    jump  = "JumpAnimationId",
+    fall  = "FallAnimationId",
+    climb = "ClimbAnimationId",
+    swim  = "SwimAnimationId",
+}
+
+-- Names of Animate folder → Animator track name mapping
+-- The Animate script names its tracks after the folder they came from
+local LOCO_TRACK_NAMES = {
+    walk  = true, run   = true, idle  = true,
+    jump  = true, fall  = true, climb = true, swim = true,
+}
+
+local appliedLoco = {}  -- [animType] = animId, persists across respawn
+
+local emoteTrackRef = nil  -- forward-declared; set by emote system below
+
+-- Stop all currently-playing locomotion tracks so Animate re-loads them.
+-- We skip the emote track so we don't kill an active emote.
+local function stopLocoTracks()
+    if not Animator then return end
+    for _, track in ipairs(Animator:GetPlayingAnimationTracks()) do
+        if track ~= emoteTrackRef then
+            -- Only stop tracks whose name matches a loco category
+            local name = track.Name and track.Name:lower() or ""
+            for cat in pairs(LOCO_TRACK_NAMES) do
+                if name:find(cat) then
+                    pcall(function() track:Stop(0) end)  -- 0 = instant, no fade
+                    break
+                end
+            end
+        end
+    end
+end
+
+-- Write IDs directly into the Animate folder children.
+-- Returns a snapshot { [animType] = oldAnimationId } so caller can restore.
+local function writeAnimateFolders(slots)
+    local snapshot = {}
+    if not Animate then return snapshot end
+    for animType, animId in pairs(slots) do
+        local folder = Animate:FindFirstChild(animType)
+        if folder then
+            for _, child in ipairs(folder:GetChildren()) do
+                if child:IsA("Animation") then
+                    snapshot[animType] = child.AnimationId
+                    pcall(function()
+                        child.AnimationId = "rbxassetid://" .. tostring(animId)
+                    end)
+                end
+            end
+        end
+    end
+    return snapshot
+end
+
+-- Core apply: ApplyDescription FIRST (so it can't clobber our folder write),
+-- then write Animate folders (our IDs always win), then stop loco tracks.
+local function applySlots(slots)
+    if not refresh() then return end
+
+    -- Step 1: ApplyDescription FIRST — some games internally reset the Animate
+    -- script when this fires. Doing it before the folder write means it cannot
+    -- overwrite our IDs. It also covers HumDesc-watching clients.
+    local ok, desc = pcall(function() return Hum:GetAppliedDescription() end)
+    if ok and desc then
+        local clone = desc:Clone()
+        for animType, animId in pairs(slots) do
+            local prop = DESC_PROP[animType]
+            if prop then
+                pcall(function() clone[prop] = tonumber(animId) or 0 end)
+            end
+        end
+        pcall(function() Hum:ApplyDescription(clone) end)
+        pcall(function() clone:Destroy() end)
+        -- Re-grab refs — ApplyDescription can recreate Animate in some games
+        refresh()
+    end
+
+    -- Step 2: Write Animate folders — always last so our IDs win over anything
+    -- ApplyDescription may have reset. Animate script reads these on next cycle.
+    writeAnimateFolders(slots)
+
+    -- Step 3: Stop loco tracks — forces Animate to re-read folders, load fresh
+    -- tracks, and :Play() them. That :Play() is the replicated event others see.
+    stopLocoTracks()
+end
+
+-- ── Public helpers ────────────────────────────────────────
+
+local function applySlot(animType, animId)
+    if not refresh() then return end
+    applySlots({ [animType] = animId })
+    appliedLoco[animType] = animId
+end
+
+local function applyBundle(bundleId)
+    if not refresh() then return end
+    Rayfield:Notify({
+        Title    = "🔄 Resolving bundle...",
+        Content  = "Fetching catalog details for ID: " .. tostring(bundleId),
+        Duration = 3,
+    })
+    task.spawn(function()
+        local map = resolveBundle(bundleId)
+        local count = 0
+        for _ in pairs(map) do count = count + 1 end
+        if count > 0 then
+            applySlots(map)
+            for cat, animId in pairs(map) do
+                appliedLoco[cat] = animId
+            end
+            Rayfield:Notify({
+                Title   = "✅ Bundle Applied",
+                Content = count .. " animation slot(s) set!",
+                Duration = 3,
+            })
+        else
+            Rayfield:Notify({
+                Title   = "⚠️ No Anims Found",
+                Content = "Bundle " .. tostring(bundleId) .. " had no locomotion anims.",
+                Duration = 4,
+            })
+        end
+    end)
+end
+
+local function resetAllLoco()
+    if not refresh() then return end
+    -- Write ALL default slots at once, then stop tracks once
+    applySlots(DEFAULT_LOCO)
+    appliedLoco = {}
+end
+
+-- Respawn: re-apply whatever was set before death
+_G.GoofyLocoReapply = function()
+    if next(appliedLoco) == nil then return end
+    if not refresh() then return end
+    applySlots(appliedLoco)
+end
+
+LP.CharacterAdded:Connect(function()
+    task.wait(1.5)   -- wait for Animate script to fully start
+    refresh()
+    _G.GoofyLocoReapply()
+end)
+
+-- ──────────────────────────────────────────────────────────
+--  SPEED LOOP
+-- ──────────────────────────────────────────────────────────
+local speedTarget = 1
+local speedConn   = nil
+
+local function applySpeedNow()
+    if not Animator then refresh() return end
+    for _, t in ipairs(Animator:GetPlayingAnimationTracks()) do
+        if t ~= emoteTrackRef then
+            pcall(function() t:AdjustSpeed(speedTarget) end)
+        end
+    end
+end
+
+local function startSpeedLoop()
+    if speedConn then speedConn:Disconnect() end
+    speedConn = RunService.Heartbeat:Connect(applySpeedNow)
+end
+
+local function stopSpeedLoop()
+    if speedConn then speedConn:Disconnect() speedConn = nil end
+    if Animator then
+        for _, t in ipairs(Animator:GetPlayingAnimationTracks()) do
+            if t ~= emoteTrackRef then
+                pcall(function() t:AdjustSpeed(1) end)
+            end
+        end
+    end
+end
+
+local function setSpeed(s)
+    speedTarget = s
+    if s == 1 then stopSpeedLoop() else startSpeedLoop() end
+end
+
+-- ──────────────────────────────────────────────────────────
+--  EMOTE SYSTEM
+-- ──────────────────────────────────────────────────────────
+local emoteTrack  = nil
+local lastEmoteId = nil
+local loopEmote   = true
+local emoteSpeed  = 1
+local freezeOn    = false
+
+local function stopEmote()
+    if emoteTrack then
+        pcall(function() emoteTrack:Stop() end)
+        emoteTrack    = nil
+        emoteTrackRef = nil
+    end
+    -- Re-apply any active bundle/loco overrides so Animate picks them back up
+    if next(appliedLoco) ~= nil then
+        task.defer(function()
+            if next(appliedLoco) ~= nil and refresh() then
+                writeAnimateFolders(appliedLoco)
+                stopLocoTracks()
+            end
+        end)
+    end
+end
+
+local function _firePlay(idNum)
+    if not refresh() then return nil end
+
+    -- Snapshot current Animate folder IDs before touching HumDesc.
+    -- SetEmotes/SetEquippedEmotes can trigger an internal Animate reset in
+    -- some games, which would wipe any bundle IDs we wrote. We restore after.
+    local snapshot = {}
+    if Animate then
+        for cat in pairs(LOCO_TRACK_NAMES) do
+            local folder = Animate:FindFirstChild(cat)
+            if folder then
+                for _, child in ipairs(folder:GetChildren()) do
+                    if child:IsA("Animation") then
+                        snapshot[cat] = child.AnimationId
+                    end
+                end
+            end
+        end
+    end
+
+    -- HumanoidDescription bypass
+    pcall(function()
+        HumDesc:SetEmotes({ _GoofySlot = { idNum } })
+        HumDesc:SetEquippedEmotes({ "_GoofySlot" })
+    end)
+
+    -- Restore folder IDs in case SetEmotes reset them
+    if Animate then
+        for cat, savedId in pairs(snapshot) do
+            local folder = Animate:FindFirstChild(cat)
+            if folder then
+                for _, child in ipairs(folder:GetChildren()) do
+                    if child:IsA("Animation") and child.AnimationId ~= savedId then
+                        pcall(function() child.AnimationId = savedId end)
+                    end
+                end
+            end
+        end
+    end
+
+    -- Primary: native emote pipeline
+    -- Returns boolean true in many games, NOT the track — use typeof guard
+    local ok2, result = pcall(function()
+        return Hum:PlayEmoteAndGetAnimTrackById(idNum)
+    end)
+    if ok2 and result and typeof(result) == "Instance" and result:IsA("AnimationTrack") then
+        return result
+    end
+
+    -- Fallback: direct Animator load (always returns a real track)
+    if not Animator then return nil end
+    local anim = Instance.new("Animation")
+    anim.AnimationId = "rbxassetid://" .. tostring(idNum)
+    local ok3, t2 = pcall(function() return Animator:LoadAnimation(anim) end)
+    if ok3 and t2 and typeof(t2) == "Instance" and t2:IsA("AnimationTrack") then
+        t2:Play()
+        return t2
+    end
+
+    return nil
+end
+
+local function playEmote(id)
+    if not refresh() then
+        Rayfield:Notify({ Title = "⚠️", Content = "No character!", Duration = 3 })
+        return false
+    end
+    if not HumDesc then
+        Rayfield:Notify({ Title = "⚠️", Content = "No HumanoidDescription!", Duration = 3 })
+        return false
+    end
+
+    stopEmote()
+
+    local idNum = tonumber(extractId(tostring(id)))
+    if not idNum then return false end
+
+    local track = _firePlay(idNum)
+    if not track then
+        Rayfield:Notify({ Title = "❌ Failed", Content = "Could not play emote ID " .. idNum, Duration = 4 })
+        return false
+    end
+
+    emoteTrack    = track
+    emoteTrackRef = track
+    lastEmoteId   = idNum
+    track.Looped   = loopEmote
+    track.Priority = Enum.AnimationPriority.Action4
+    pcall(function() track:AdjustSpeed(emoteSpeed) end)
+
+    local capturedTrack = track
+    track.Stopped:Connect(function()
+        if emoteTrack == capturedTrack and not freezeOn then
+            emoteTrack    = nil
+            emoteTrackRef = nil
+            -- Restore bundle anims so Animate doesn't fall back to defaults
+            if next(appliedLoco) ~= nil then
+                task.defer(function()
+                    if next(appliedLoco) ~= nil and refresh() then
+                        writeAnimateFolders(appliedLoco)
+                        stopLocoTracks()
+                    end
+                end)
+            end
+        end
+    end)
+
+    return true
+end
+
+-- ──────────────────────────────────────────────────────────
+--  WALK-FREEZE SYSTEM
+-- ──────────────────────────────────────────────────────────
+local freezeConn = nil
+
+local function startFreeze()
+    if not lastEmoteId then
+        Rayfield:Notify({ Title = "⚠️ No Emote", Content = "Play an emote first!", Duration = 3 })
+        return
+    end
+    freezeOn = true
+    if freezeConn then freezeConn:Disconnect() end
+    freezeConn = RunService.Heartbeat:Connect(function()
+        if not freezeOn then return end
+        if not refresh() then return end
+        if emoteTrack and emoteTrack.IsPlaying then
+            pcall(function() emoteTrack.Priority = Enum.AnimationPriority.Action4 end)
+            pcall(function() emoteTrack:AdjustSpeed(emoteSpeed) end)
+        else
+            local track = _firePlay(lastEmoteId)
+            if track then
+                emoteTrack    = track
+                emoteTrackRef = track
+                track.Looped   = loopEmote
+                track.Priority = Enum.AnimationPriority.Action4
+                pcall(function() track:AdjustSpeed(emoteSpeed) end)
+            end
+        end
+    end)
+end
+
+local function stopFreeze()
+    freezeOn = false
+    if freezeConn then freezeConn:Disconnect() freezeConn = nil end
+end
+
+-- ──────────────────────────────────────────────────────────
+--  PRESETS
+-- ──────────────────────────────────────────────────────────
+local ANIM_BUNDLES = {
+    { "🧍 Default (R15)",   "48"  },
+    { "🥷 Ninja",           "75"  },
+    { "🧟 Zombie",          "76"  },
+    { "🤖 Robot",           "77"  },
+    { "🧙 Mage",            "78"  },
+    { "🦸 Superhero",       "79"  },
+    { "💀 Skeleton",        "80"  },
+    { "🎭 Cartoony",        "81"  },
+    { "👴 Old Man",         "82"  },
+    { "🐺 Werewolf",        "83"  },
+    { "🧝 Elf",             "84"  },
+    { "🏃 Athletic",        "85"  },
+    { "🌊 Swimmer",         "86"  },
+    { "🧗 Climber",         "87"  },
+    { "🕵️ Spy",             "88"  },
+    { "👑 Royal Guard",     "89"  },
+    { "🏴‍☠️ Pirate",          "90"  },
+}
+
+local WALK_PRESETS = {
+    { "Default Walk",     "507777826"  },
+    { "Ninja Walk",       "616163682"  },
+    { "Zombie Walk",      "616000277"  },
+    { "Robot Walk",       "616010382"  },
+    { "Cartoony Walk",    "742638842"  },
+    { "Werewolf Walk",    "1083218640" },
+    { "Superhero Walk",   "616008176"  },
+    { "Pirate Walk",      "750693392"  },
+}
+
+local RUN_PRESETS = {
+    { "Default Run",      "507767714"  },
+    { "Ninja Run",        "616163682"  },
+    { "Zombie Run",       "616000949"  },
+    { "Robot Run",        "616010382"  },
+    { "Cartoony Run",     "742638842"  },
+    { "Werewolf Run",     "1083218792" },
+    { "Superhero Run",    "616008378"  },
+    { "Pirate Run",       "750693392"  },
+}
+
+local IDLE_PRESETS = {
+    { "Default Idle",     "507766388"  },
+    { "Ninja Idle",       "616106763"  },
+    { "Zombie Idle",      "616000378"  },
+    { "Robot Idle",       "616008087"  },
+    { "Cartoony Idle",    "754637456"  },
+    { "Werewolf Idle",    "1083218494" },
+    { "Superhero Idle",   "616007765"  },
+    { "Pirate Idle",      "750693392"  },
+}
+
+local EMOTE_PRESETS = {
+    { "💃 Dance 1",  507771019 },
+    { "🕺 Dance 2",  507771955 },
+    { "🎵 Dance 3",  507772104 },
+    { "👋 Wave",     507770239 },
+    { "😂 Laugh",    507770818 },
+    { "☝️ Point",    507770453 },
+    { "🎉 Cheer",    507770677 },
+}
+
+-- ──────────────────────────────────────────────────────────
+--  WINDOW
+-- ──────────────────────────────────────────────────────────
+local Win = Rayfield:CreateWindow({
+    Name            = "🤪 Goofy Anim Hub v10",
+    LoadingTitle    = "Goofy Anim Hub",
+    LoadingSubtitle = "Track-stop sync • Catalog API resolver",
+    ConfigurationSaving = { Enabled = false },
+    Discord         = { Enabled = false },
+    KeySystem       = false,
+})
+
+-- ════════════════════════════════════════════════════════════
+--  TAB 1 — EMOTES
+-- ════════════════════════════════════════════════════════════
+local ET = Win:CreateTab("Emotes 🎭", "laugh")
+
+ET:CreateSection("Built-in Roblox Emotes  ✅ Works Anywhere")
+for _, e in ipairs(EMOTE_PRESETS) do
+    ET:CreateButton({
+        Name     = e[1],
+        Callback = function()
+            local ok = playEmote(e[2])
+            if ok then Rayfield:Notify({ Title = e[1], Content = "Playing!", Duration = 2 }) end
+        end,
+    })
+end
+
+ET:CreateSection("Options")
+ET:CreateSlider({
+    Name         = "Emote Speed",
+    Range        = { 0, 10 },
+    Increment    = 0.1,
+    CurrentValue = 1,
+    Callback     = function(v)
+        emoteSpeed = v
+        if emoteTrack and emoteTrack.IsPlaying then
+            pcall(function() emoteTrack:AdjustSpeed(v) end)
+        end
+    end,
+})
+
+ET:CreateToggle({
+    Name         = "🔁 Loop Emote",
+    CurrentValue = true,
+    Callback     = function(v)
+        loopEmote = v
+        if emoteTrack then pcall(function() emoteTrack.Looped = v end) end
+    end,
+})
+
+ET:CreateToggle({
+    Name         = "🔒 Walk Freeze  (plays while walking/running)",
+    CurrentValue = false,
+    Callback     = function(v)
+        if v then
+            startFreeze()
+            Rayfield:Notify({ Title = "🔒 Walk Freeze ON", Content = "Emote plays regardless of movement!", Duration = 3 })
+        else
+            stopFreeze()
+            Rayfield:Notify({ Title = "🔓 Walk Freeze OFF", Content = "Normal emote behaviour restored.", Duration = 2 })
+        end
+    end,
+})
+
+ET:CreateSection("Custom Emote / Anim ID")
+ET:CreateInput({
+    Name            = "Animation ID",
+    PlaceholderText = "Paste any Animation ID...",
+    NumbersOnly     = true,
+    Callback        = function(v)
+        if v and #v > 0 then
+            local ok = playEmote(v)
+            if ok then Rayfield:Notify({ Title = "▶️ Playing", Content = "ID: " .. v, Duration = 2 }) end
+        end
+    end,
+})
+
+ET:CreateButton({
+    Name     = "⛔  Stop Emote",
+    Callback = function()
+        stopEmote()
+        Rayfield:Notify({ Title = "⛔ Stopped", Content = "Emote stopped.", Duration = 2 })
+    end,
+})
+
+-- ════════════════════════════════════════════════════════════
+--  TAB 2 — ANIMATION BUNDLES
+-- ════════════════════════════════════════════════════════════
+local BT = Win:CreateTab("Anim Bundles 📦", "package")
+
+BT:CreateSection("Preset Bundles  (sets walk + run + idle + jump + fall)")
+for _, b in ipairs(ANIM_BUNDLES) do
+    BT:CreateButton({
+        Name     = b[1],
+        Callback = function() applyBundle(b[2]) end,
+    })
+end
+
+BT:CreateSection("Custom Bundle ID")
+BT:CreateInput({
+    Name            = "Bundle ID",
+    PlaceholderText = "Paste any Roblox Bundle ID...",
+    NumbersOnly     = true,
+    Callback        = function(v)
+        if v and #v > 0 then applyBundle(v) end
+    end,
+})
+
+BT:CreateButton({
+    Name     = "♻️  Reset All Loco to Default",
+    Callback = function()
+        resetAllLoco()
+        Rayfield:Notify({ Title = "✅ Reset", Content = "All locomotion anims restored.", Duration = 2 })
+    end,
+})
+
+-- ════════════════════════════════════════════════════════════
+--  TAB 3 — WALK
+-- ════════════════════════════════════════════════════════════
+local WT = Win:CreateTab("Walk 🚶", "activity")
+
+WT:CreateSection("Presets")
+for _, w in ipairs(WALK_PRESETS) do
+    WT:CreateButton({
+        Name     = w[1],
+        Callback = function()
+            if not refresh() then return end
+            applySlot("walk", w[2])
+            Rayfield:Notify({ Title = "🚶 " .. w[1], Content = "Walk anim set.", Duration = 2 })
+        end,
+    })
+end
+
+WT:CreateSection("Custom Walk ID")
+WT:CreateInput({
+    Name            = "Walk Animation ID",
+    PlaceholderText = "Paste Walk Anim ID...",
+    NumbersOnly     = true,
+    Callback        = function(v)
+        if v and #v > 0 then
+            if not refresh() then return end
+            applySlot("walk", v)
+            Rayfield:Notify({ Title = "🚶 Walk Set", Content = "ID: " .. v, Duration = 2 })
+        end
+    end,
+})
+
+WT:CreateButton({
+    Name     = "♻️  Reset Walk",
+    Callback = function()
+        if not refresh() then return end
+        applySlot("walk", DEFAULT_LOCO.walk)
+        Rayfield:Notify({ Title = "✅ Walk Reset", Content = "Default restored.", Duration = 2 })
+    end,
+})
+
+-- ════════════════════════════════════════════════════════════
+--  TAB 4 — RUN
+-- ════════════════════════════════════════════════════════════
+local RT = Win:CreateTab("Run 🏃", "zap")
+
+RT:CreateSection("Presets")
+for _, r in ipairs(RUN_PRESETS) do
+    RT:CreateButton({
+        Name     = r[1],
+        Callback = function()
+            if not refresh() then return end
+            applySlot("run", r[2])
+            Rayfield:Notify({ Title = "🏃 " .. r[1], Content = "Run anim set.", Duration = 2 })
+        end,
+    })
+end
+
+RT:CreateSection("Custom Run ID")
+RT:CreateInput({
+    Name            = "Run Animation ID",
+    PlaceholderText = "Paste Run Anim ID...",
+    NumbersOnly     = true,
+    Callback        = function(v)
+        if v and #v > 0 then
+            if not refresh() then return end
+            applySlot("run", v)
+            Rayfield:Notify({ Title = "🏃 Run Set", Content = "ID: " .. v, Duration = 2 })
+        end
+    end,
+})
+
+RT:CreateButton({
+    Name     = "♻️  Reset Run",
+    Callback = function()
+        if not refresh() then return end
+        applySlot("run", DEFAULT_LOCO.run)
+        Rayfield:Notify({ Title = "✅ Run Reset", Content = "Default restored.", Duration = 2 })
+    end,
+})
+
+-- ════════════════════════════════════════════════════════════
+--  TAB 5 — IDLE / JUMP / FALL
+-- ════════════════════════════════════════════════════════════
+local IT = Win:CreateTab("Idle 🧍", "user")
+
+IT:CreateSection("Idle Presets")
+for _, i in ipairs(IDLE_PRESETS) do
+    IT:CreateButton({
+        Name     = i[1],
+        Callback = function()
+            if not refresh() then return end
+            applySlot("idle", i[2])
+            Rayfield:Notify({ Title = "🧍 " .. i[1], Content = "Idle anim set.", Duration = 2 })
+        end,
+    })
+end
+
+IT:CreateSection("Custom Idle ID")
+IT:CreateInput({
+    Name            = "Idle Animation ID",
+    PlaceholderText = "Paste Idle Anim ID...",
+    NumbersOnly     = true,
+    Callback        = function(v)
+        if v and #v > 0 then
+            if not refresh() then return end
+            applySlot("idle", v)
+            Rayfield:Notify({ Title = "🧍 Idle Set", Content = "ID: " .. v, Duration = 2 })
+        end
+    end,
+})
+
+IT:CreateSection("Jump & Fall")
+IT:CreateInput({
+    Name            = "Jump Animation ID",
+    PlaceholderText = "Paste Jump Anim ID...",
+    NumbersOnly     = true,
+    Callback        = function(v)
+        if v and #v > 0 then
+            if not refresh() then return end
+            applySlot("jump", v)
+            Rayfield:Notify({ Title = "Jump Set", Content = "ID: " .. v, Duration = 2 })
+        end
+    end,
+})
+
+IT:CreateInput({
+    Name            = "Fall Animation ID",
+    PlaceholderText = "Paste Fall Anim ID...",
+    NumbersOnly     = true,
+    Callback        = function(v)
+        if v and #v > 0 then
+            if not refresh() then return end
+            applySlot("fall", v)
+            Rayfield:Notify({ Title = "Fall Set", Content = "ID: " .. v, Duration = 2 })
+        end
+    end,
+})
+
+IT:CreateButton({
+    Name     = "♻️  Reset Idle / Jump / Fall",
+    Callback = function()
+        if not refresh() then return end
+        applySlots({
+            idle  = DEFAULT_LOCO.idle,
+            jump  = DEFAULT_LOCO.jump,
+            fall  = DEFAULT_LOCO.fall,
+        })
+        appliedLoco.idle  = nil
+        appliedLoco.jump  = nil
+        appliedLoco.fall  = nil
+        Rayfield:Notify({ Title = "✅ Reset", Content = "Idle/Jump/Fall restored.", Duration = 2 })
+    end,
+})
+
+-- ════════════════════════════════════════════════════════════
+--  TAB 6 — SPEED
+-- ════════════════════════════════════════════════════════════
+local ST = Win:CreateTab("Speed 🎚️", "bar-chart-2")
+
+ST:CreateSection("Locomotion Speed (walk / run / idle)")
+ST:CreateSlider({
+    Name         = "Speed Multiplier",
+    Range        = { 0, 10 },
+    Increment    = 0.1,
+    CurrentValue = 1,
+    Callback     = function(v) setSpeed(v) end,
+})
+
+ST:CreateSection("Presets")
+local SPEED_PRESETS = {
+    { "🐌 Ultra Slow (0.1x)",  0.1  },
+    { "🐢 Slow Mo (0.25x)",    0.25 },
+    { "🚶 Half (0.5x)",        0.5  },
+    { "✅ Normal (1x)",        1.0  },
+    { "🐇 Fast (2x)",          2.0  },
+    { "⚡ Speed Run (3x)",     3.0  },
+    { "🚀 Turbo (5x)",         5.0  },
+    { "💀 Insane (10x)",       10.0 },
+}
+for _, p in ipairs(SPEED_PRESETS) do
+    ST:CreateButton({
+        Name     = p[1],
+        Callback = function()
+            setSpeed(p[2])
+            Rayfield:Notify({ Title = p[1], Content = "Loco speed = " .. p[2] .. "x", Duration = 2 })
+        end,
+    })
+end
+
+ST:CreateSection("Goofy Modes")
+
+local moonOn   = false
+local moonConn = nil
+ST:CreateButton({
+    Name     = "🌕  Moonwalk (reverse loco)",
+    Callback = function()
+        if moonOn then
+            moonOn = false
+            if moonConn then moonConn:Disconnect() moonConn = nil end
+            if Animator then
+                for _, t in ipairs(Animator:GetPlayingAnimationTracks()) do
+                    if t ~= emoteTrackRef then
+                        pcall(function() t:AdjustSpeed(math.abs(speedTarget)) end)
+                    end
+                end
+            end
+            Rayfield:Notify({ Title = "🌕 Moonwalk OFF", Content = "Normal restored.", Duration = 2 })
+        else
+            moonOn = true
+            stopSpeedLoop()
+            moonConn = RunService.Heartbeat:Connect(function()
+                if not Animator then refresh() return end
+                for _, t in ipairs(Animator:GetPlayingAnimationTracks()) do
+                    if t ~= emoteTrackRef then
+                        pcall(function() t:AdjustSpeed(-math.abs(speedTarget)) end)
+                    end
+                end
+            end)
+            Rayfield:Notify({ Title = "🌕 Moonwalk ON!", Content = "Animations play in reverse!", Duration = 2 })
+        end
+    end,
+})
+
+local drunkOn   = false
+local drunkConn = nil
+ST:CreateButton({
+    Name     = "🥴  Drunk Mode (random speed)",
+    Callback = function()
+        if drunkOn then
+            drunkOn = false
+            if drunkConn then drunkConn:Disconnect() drunkConn = nil end
+            if Animator then
+                for _, t in ipairs(Animator:GetPlayingAnimationTracks()) do
+                    if t ~= emoteTrackRef then
+                        pcall(function() t:AdjustSpeed(speedTarget) end)
+                    end
+                end
+            end
+            Rayfield:Notify({ Title = "🥴 Drunk OFF", Content = "Normal restored.", Duration = 2 })
+        else
+            drunkOn = true
+            stopSpeedLoop()
+            local timer = 0
+            local nextSpd = 1
+            drunkConn = RunService.Heartbeat:Connect(function(dt)
+                if not Animator then refresh() return end
+                timer = timer - dt
+                if timer <= 0 then
+                    nextSpd = math.random(5, 30) / 10
+                    timer   = math.random(8, 35) / 100
+                end
+                for _, t in ipairs(Animator:GetPlayingAnimationTracks()) do
+                    if t ~= emoteTrackRef then
+                        pcall(function() t:AdjustSpeed(nextSpd) end)
+                    end
+                end
+            end)
+            Rayfield:Notify({ Title = "🥴 Drunk ON!", Content = "Random speed active!", Duration = 2 })
+        end
+    end,
+})
+
+ST:CreateButton({
+    Name     = "⏸️  Freeze All Loco",
+    Callback = function()
+        moonOn = false
+        if moonConn then moonConn:Disconnect() moonConn = nil end
+        drunkOn = false
+        if drunkConn then drunkConn:Disconnect() drunkConn = nil end
+        setSpeed(0)
+        Rayfield:Notify({ Title = "⏸️ Frozen", Content = "All loco animations paused.", Duration = 2 })
+    end,
+})
+
+ST:CreateButton({
+    Name     = "♻️  Reset Speed",
+    Callback = function()
+        moonOn = false
+        if moonConn then moonConn:Disconnect() moonConn = nil end
+        drunkOn = false
+        if drunkConn then drunkConn:Disconnect() drunkConn = nil end
+        setSpeed(1)
+        Rayfield:Notify({ Title = "✅ Speed Reset", Content = "1x restored.", Duration = 2 })
+    end,
+})
+
+-- ════════════════════════════════════════════════════════════
+--  TAB 7 — RESET ALL
+-- ════════════════════════════════════════════════════════════
+local ZT = Win:CreateTab("Reset All ♻️", "rotate-ccw")
+
+ZT:CreateSection("Nuclear Reset")
+ZT:CreateButton({
+    Name     = "♻️  Reset EVERYTHING",
+    Callback = function()
+        stopEmote()
+        stopFreeze()
+        moonOn = false
+        if moonConn then moonConn:Disconnect() moonConn = nil end
+        drunkOn = false
+        if drunkConn then drunkConn:Disconnect() drunkConn = nil end
+        setSpeed(1)
+        resetAllLoco()
+        Rayfield:Notify({ Title = "✅ Full Reset", Content = "All anims, speed and emotes cleared.", Duration = 3 })
+    end,
+})
+
+-- ──────────────────────────────────────────────────────────
+Rayfield:Notify({
+    Title    = "🤪 Goofy Anim Hub v10!",
+    Content  = "Track-stop sync active • Catalog API resolver ready",
+    Duration = 4,
+})
