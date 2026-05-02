@@ -269,6 +269,21 @@ local scripts = {
         url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/speedboosterlc"
     },
     {
+        name = "Ragdoll (LIMBS ONLY)",
+        placeId = nil,
+        url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/limbsonlyragdoll"
+    },
+    {
+        name = "Ragdoll (FULL BODY)",
+        placeId = nil,
+        url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/fullragdoll"
+    },
+    {
+        name = "Instant Respawn",
+        placeId = nil,
+        url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/instantrespawn"
+    },
+    {
         name = "Volleyball Legends Hitbox Expander",
         placeId = 73956553001240,
         url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/volleyballlegendshitbox"
