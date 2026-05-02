@@ -1,0 +1,33 @@
+local player = game.Players.LocalPlayer
+local character = player.Character
+
+local function ragdoll(char)
+    local humanoid = char:FindFirstChild("Humanoid")
+    if not humanoid then return end
+
+    -- Disable all Motor6D joints and add BallSocketConstraints
+    for _, motor in ipairs(char:GetDescendants()) do
+        if motor:IsA("Motor6D") and motor.Part0 and motor.Part1 then
+            local attachment0 = Instance.new("Attachment", motor.Part0)
+            local attachment1 = Instance.new("Attachment", motor.Part1)
+            attachment0.CFrame = motor.C0
+            attachment1.CFrame = motor.C1
+
+            local ballSocket = Instance.new("BallSocketConstraint", motor.Part0)
+            ballSocket.Attachment0 = attachment0
+            ballSocket.Attachment1 = attachment1
+            ballSocket.LimitsEnabled = true
+            ballSocket.TwistLimitsEnabled = false
+
+            motor.Enabled = false
+        end
+    end
+
+    -- Make humanoid state dead so game doesnt respawn immediately
+    humanoid:ChangeState(Enum.HumanoidStateType.Dead)
+
+    -- Wait 2 seconds to show ragdoll then respawn
+    humanoid.Health = 0
+end
+
+ragdoll(character)
