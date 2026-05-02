@@ -1,0 +1,122 @@
+local player = game.Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local rootPart = character:FindFirstChild("HumanoidRootPart")
+local humanoid = character:FindFirstChildOfClass("Humanoid")
+local animator = humanoid:FindFirstChildOfClass("Animator")
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+-- Settings
+local moveSpeed = 30
+local platformLifetime = 0.5
+local platformSize = Vector3.new(4, 0.5, 4)
+
+-- Walk anim
+local walkAnim = Instance.new("Animation")
+walkAnim.AnimationId = "rbxassetid://507777826"
+local walkTrack = animator:LoadAnimation(walkAnim)
+walkTrack.Priority = Enum.AnimationPriority.Action
+
+-- State
+local flying = false
+local platform = nil
+local trail = {}
+local lastTrail = 0
+local isMoving = false
+
+local function startFlying()
+    flying = true
+    humanoid.PlatformStand = true
+
+    platform = Instance.new("Part")
+    platform.Size = platformSize
+    platform.Anchored = true
+    platform.CanCollide = true
+    platform.Transparency = 1
+    platform.CanQuery = false
+    platform.CastShadow = false
+    platform.Parent = workspace
+    platform.Position = Vector3.new(
+        rootPart.Position.X,
+        rootPart.Position.Y - 3,
+        rootPart.Position.Z
+    )
+end
+
+local function stopFlying()
+    flying = false
+    humanoid.PlatformStand = false
+    walkTrack:Stop()
+    isMoving = false
+
+    if platform then platform:Destroy() platform = nil end
+    for _, t in ipairs(trail) do t.part:Destroy() end
+    trail = {}
+end
+
+UIS.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.F then
+        if flying then stopFlying() else startFlying() end
+    end
+end)
+
+RunService.RenderStepped:Connect(function(dt)
+    if not flying or not platform then return end
+
+    local cam = workspace.CurrentCamera
+    local move = Vector3.zero
+
+    if UIS:IsKeyDown(Enum.KeyCode.W) then move += Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z) end
+    if UIS:IsKeyDown(Enum.KeyCode.S) then move -= Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z) end
+    if UIS:IsKeyDown(Enum.KeyCode.A) then move -= Vector3.new(cam.CFrame.RightVector.X, 0, cam.CFrame.RightVector.Z) end
+    if UIS:IsKeyDown(Enum.KeyCode.D) then move += Vector3.new(cam.CFrame.RightVector.X, 0, cam.CFrame.RightVector.Z) end
+    if UIS:IsKeyDown(Enum.KeyCode.Space) then move += Vector3.new(0, 1, 0) end
+    if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then move -= Vector3.new(0, 1, 0) end
+
+    if move.Magnitude > 0 then
+        platform.Position = platform.Position + move.Unit * moveSpeed * dt
+    end
+
+    -- Stick player on top of platform, keep their own rotation untouched
+    rootPart.CFrame = CFrame.new(
+        platform.Position.X,
+        platform.Position.Y + platformSize.Y / 2 + 3,
+        platform.Position.Z
+    ) * CFrame.fromEulerAnglesYXZ(0, rootPart.CFrame:ToEulerAnglesYXZ())
+    rootPart.AssemblyLinearVelocity = Vector3.zero
+
+    -- Walk anim on horizontal movement only
+    local flatMove = Vector3.new(move.X, 0, move.Z)
+    if flatMove.Magnitude > 0 and not isMoving then
+        isMoving = true
+        walkTrack:Play()
+    elseif flatMove.Magnitude == 0 and isMoving then
+        isMoving = false
+        walkTrack:Stop()
+    end
+
+    -- Trail
+    local now = tick()
+    if now - lastTrail > 0.1 then
+        lastTrail = now
+        local part = Instance.new("Part")
+        part.Size = platformSize
+        part.Anchored = true
+        part.CanCollide = true
+        part.Transparency = 1
+        part.CanQuery = false
+        part.CastShadow = false
+        part.Position = platform.Position
+        part.Parent = workspace
+        table.insert(trail, {part = part, born = now})
+    end
+
+    for i = #trail, 1, -1 do
+        local t = trail[i]
+        if now - t.born >= platformLifetime then
+            t.part:Destroy()
+            table.remove(trail, i)
+        end
+    end
+end)
