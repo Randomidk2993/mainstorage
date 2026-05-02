@@ -1,0 +1,23 @@
+local player = game.Players.LocalPlayer
+local character = player.Character
+
+local skipJoints = {"RootJoint", "Neck", "Root", "Waist"}
+
+for _, motor in ipairs(character:GetDescendants()) do
+    if motor:IsA("Motor6D") and motor.Part0 and motor.Part1 then
+        if not table.find(skipJoints, motor.Name) then
+            local attachment0 = Instance.new("Attachment", motor.Part0)
+            local attachment1 = Instance.new("Attachment", motor.Part1)
+            attachment0.CFrame = motor.C0
+            attachment1.CFrame = motor.C1
+
+            local ballSocket = Instance.new("BallSocketConstraint", motor.Part0)
+            ballSocket.Attachment0 = attachment0
+            ballSocket.Attachment1 = attachment1
+            ballSocket.LimitsEnabled = true
+            ballSocket.TwistLimitsEnabled = false
+
+            motor.Enabled = false
+        end
+    end
+end
