@@ -264,6 +264,11 @@ local scripts = {
         url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/erlcfly"
     },
     {
+        name = "WindUI Universal (spoofs metaable DO NOT RUN IN ERLC)",
+        placeId = nil,
+        url = "https://raw.githubusercontent.com/blueberryggames-a11y/ssrp/refs/heads/main/main.luau"
+    },
+    {
         name = "ERLC: Emergency Response Car Speed Boost",
         placeId = 2534724415,
         url = "https://raw.githubusercontent.com/Randomidk2993/mainstorage/main/speedboosterlc"
