@@ -12,7 +12,7 @@ end
 local Window = Rayfield:CreateWindow({
     Name = "Script Loader",
     LoadingTitle = "Loader Interface",
-    LoadingSubtitle = "by You",
+    LoadingSubtitle = "by discord: pikaorsmth",
     ConfigurationSaving = { Enabled = false },
     Discord = { Enabled = false },
     KeySystem = false
